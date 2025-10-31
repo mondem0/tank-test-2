@@ -186,6 +186,33 @@ local pathExpiresAt = 0
 local isComputingPath = false
 local lastStepTime = 0
 local immediateRepathRequested = false
+local pendingJumpRequest = false
+
+local groundedStates = {
+    [Enum.HumanoidStateType.Running] = true,
+    [Enum.HumanoidStateType.RunningNoPhysics] = true,
+    [Enum.HumanoidStateType.Landed] = true,
+}
+
+local function tryPerformPendingJump()
+    if not pendingJumpRequest then
+        return
+    end
+
+    if humanoid.FloorMaterial == Enum.Material.Air then
+        return
+    end
+
+    humanoid.Jump = true
+    humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    pendingJumpRequest = false
+end
+
+humanoid.StateChanged:Connect(function(_, newState)
+    if groundedStates[newState] then
+        tryPerformPendingJump()
+    end
+end)
 
 local function followNextWaypoint()
     if not activeWaypoints then
@@ -195,6 +222,7 @@ local function followNextWaypoint()
     local nextIndex = activeWaypointIndex + 1
     if nextIndex > #activeWaypoints then
         activeWaypoints = nil
+        pendingJumpRequest = false
         clearMarkers()
         return
     end
@@ -203,8 +231,8 @@ local function followNextWaypoint()
     local waypoint = activeWaypoints[nextIndex]
 
     if waypoint.Action == Enum.PathWaypointAction.Jump then
-        humanoid.Jump = true
-        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        pendingJumpRequest = true
+        tryPerformPendingJump()
     end
 
     humanoid:MoveTo(waypoint.Position)
@@ -219,11 +247,13 @@ humanoid.MoveToFinished:Connect(function(reached)
         followNextWaypoint()
     else
         activeWaypoints = nil
+        pendingJumpRequest = false
         immediateRepathRequested = true
     end
 end)
 
 local function beginFollowingPath(waypoints: { PathWaypoint }, targetPosition: Vector3)
+    pendingJumpRequest = false
     activeWaypoints = waypoints
     activeWaypointIndex = 1
     desiredTargetPosition = targetPosition
@@ -278,6 +308,7 @@ local function computePathAsync(targetPosition: Vector3, fallbackPosition: Vecto
 
             if not followed then
                 activeWaypoints = nil
+                pendingJumpRequest = false
                 clearMarkers()
                 humanoid:MoveTo(fallbackPosition or targetPosition)
             end
@@ -286,6 +317,7 @@ local function computePathAsync(targetPosition: Vector3, fallbackPosition: Vecto
         if not ok then
             warn(string.format("Stalker path computation failed: %s", tostring(err)))
             activeWaypoints = nil
+            pendingJumpRequest = false
             clearMarkers()
             humanoid:MoveTo(fallbackPosition or targetPosition)
         end
@@ -297,6 +329,7 @@ end
 local function onStep()
     if humanoid.Health <= 0 then
         activeWaypoints = nil
+        pendingJumpRequest = false
         clearMarkers()
         return
     end
@@ -304,6 +337,7 @@ local function onStep()
     local player = findClosestPlayer()
     if not player then
         activeWaypoints = nil
+        pendingJumpRequest = false
         desiredTargetPosition = nil
         clearMarkers()
         humanoid:MoveTo(root.Position)
@@ -324,6 +358,7 @@ local function onStep()
     local currentDistance = (hrp.Position - root.Position).Magnitude
     if math.abs(currentDistance - CONFIG.DesiredDistance) <= CONFIG.DistanceTolerance then
         activeWaypoints = nil
+        pendingJumpRequest = false
         desiredTargetPosition = nil
         clearMarkers()
         humanoid:MoveTo(root.Position)
