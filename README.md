@@ -16,6 +16,7 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
      - `DistanceTolerance` *(NumberValue, studs, default 2)* – How close to the target distance the NPC must be before it stops.
      - `PathRefreshSeconds` *(NumberValue, default 0.5)* – How often to recompute the path and distance targeting.
      - `MaxPathTime` *(NumberValue, default 1.5)* – How long the NPC follows the same path before forcing a refresh.
+     - `WalkSpeed` *(NumberValue, default matches Humanoid WalkSpeed)* – How fast the stalker moves while chasing.
      - `ShowPathVisuals` *(BoolValue, default true)* – Turns the neon waypoint spheres and beams on or off.
      - `PathMarkerSize` *(NumberValue, default 0.75)* – Diameter of the waypoint spheres.
      - `PathBeamWidth` *(NumberValue, default 0.15)* – Thickness of the connecting beams.

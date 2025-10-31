@@ -19,6 +19,7 @@ local DEFAULT_CONFIG = {
     DistanceTolerance = 2,
     PathRefreshSeconds = 0.5,
     MaxPathTime = 1.5,
+    WalkSpeed = humanoid.WalkSpeed,
     ShowPathVisuals = true,
     PathMarkerSize = 0.75,
     PathBeamWidth = 0.15,
@@ -45,6 +46,8 @@ local function refreshConfig()
     for key, defaultValue in pairs(DEFAULT_CONFIG) do
         CONFIG[key] = getAttributeOrDefault(key, defaultValue)
     end
+
+    humanoid.WalkSpeed = CONFIG.WalkSpeed
 end
 
 refreshConfig()
