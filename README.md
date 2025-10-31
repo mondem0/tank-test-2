@@ -11,12 +11,18 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
    - Make sure the model contains a `Humanoid` object and a `HumanoidRootPart` (default for Roblox characters). Set the model's `PrimaryPart` to `HumanoidRootPart`.
 
 2. **Add configuration attributes (optional)**
-   - With the model selected, create Number attributes to tweak behavior:
-     - `DesiredDistance` (studs) – default 14. The distance the NPC tries to maintain from the player.
-     - `DistanceTolerance` (studs) – default 2. How much wiggle room is allowed before the NPC moves.
-     - `PathRefreshSeconds` – default 0.5. How often the path recalculates.
-     - `MaxPathTime` – default 1.5. Caps how long the NPC commits to a path before recomputing.
-   - If you skip this step the script falls back to its default values.
+   - With the model selected, create attributes to tweak behavior. All attributes are optional—any you omit will use the defaults baked into the script.
+     - `DesiredDistance` *(NumberValue, studs, default 14)* – How far the NPC wants to stay from the tracked player.
+     - `DistanceTolerance` *(NumberValue, studs, default 2)* – How close to the target distance the NPC must be before it stops.
+     - `PathRefreshSeconds` *(NumberValue, default 0.5)* – How often to recompute the path and distance targeting.
+     - `MaxPathTime` *(NumberValue, default 1.5)* – How long the NPC follows the same path before forcing a refresh.
+     - `ShowPathVisuals` *(BoolValue, default true)* – Turns the neon waypoint spheres and beams on or off.
+     - `PathMarkerSize` *(NumberValue, default 0.75)* – Diameter of the waypoint spheres.
+     - `PathBeamWidth` *(NumberValue, default 0.15)* – Thickness of the connecting beams.
+     - `PathVisualTransparency` *(NumberValue 0-1, default 0.2)* – Transparency of the beams.
+     - `PathVisualColor` *(Color3Value, default RGB 255,170,0)* – Color used for both waypoint markers and beams.
+     - `AgentCanJump` *(BoolValue, default true)* – Whether the computed path is allowed to include jumps.
+   - The script listens for attribute changes at runtime, so you can tweak values live during a Studio playtest.
 
 3. **Insert the script**
    - Create a **Script** inside the `StalkerEnemy` model (not a LocalScript).
@@ -32,9 +38,9 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
      - Spawn glowing spheres and beams that reveal each waypoint in the computed path.
    - The trail updates every time the NPC recalculates its path, so you can visualize how it reacts to obstacles and player movement.
 
-5. **Cleanup (optional)**
-   - You can recolor or resize the visuals by editing the `PATH_VISUAL_COLOR`, beam width, or marker size constants near the top of the script.
-   - To disable visuals entirely, remove the body of the `drawPath` function.
+5. **Fine-tuning later**
+   - Update the attributes at any time to adjust the stalker's feel without editing the Script directly.
+   - To revert all settings, clear the attributes you added—the defaults defined in the script will take over automatically.
 
 ### Notes
 

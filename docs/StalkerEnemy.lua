@@ -13,11 +13,40 @@ end
 local humanoid: Humanoid = stalkerModel:WaitForChild("Humanoid")
 local root: BasePart = stalkerModel:WaitForChild("HumanoidRootPart")
 
-local DESIRED_DISTANCE = stalkerModel:GetAttribute("DesiredDistance") or 14
-local DISTANCE_TOLERANCE = stalkerModel:GetAttribute("DistanceTolerance") or 2
-local PATH_REFRESH = stalkerModel:GetAttribute("PathRefreshSeconds") or 0.5
-local MAX_PATH_TIME = stalkerModel:GetAttribute("MaxPathTime") or 1.5
-local PATH_VISUAL_COLOR = Color3.fromRGB(255, 170, 0)
+local DEFAULT_CONFIG = {
+    DesiredDistance = 14,
+    DistanceTolerance = 2,
+    PathRefreshSeconds = 0.5,
+    MaxPathTime = 1.5,
+    ShowPathVisuals = true,
+    PathMarkerSize = 0.75,
+    PathBeamWidth = 0.15,
+    PathVisualTransparency = 0.2,
+    PathVisualColor = Color3.fromRGB(255, 170, 0),
+    AgentCanJump = true,
+}
+
+local CONFIG = table.clone(DEFAULT_CONFIG)
+
+local function getAttributeOrDefault(attributeName: string, defaultValue)
+    local attributeValue = stalkerModel:GetAttribute(attributeName)
+    if attributeValue == nil then
+        return defaultValue
+    end
+    return attributeValue
+end
+
+local function refreshConfig()
+    for key, defaultValue in pairs(DEFAULT_CONFIG) do
+        CONFIG[key] = getAttributeOrDefault(key, defaultValue)
+    end
+end
+
+refreshConfig()
+
+for attributeName in pairs(DEFAULT_CONFIG) do
+    stalkerModel:GetAttributeChangedSignal(attributeName):Connect(refreshConfig)
+end
 
 local markerFolder = Instance.new("Folder")
 markerFolder.Name = "PathMarkers"
@@ -51,6 +80,11 @@ local function clearMarkers()
 end
 
 local function drawPath(waypoints: { PathWaypoint })
+    if not CONFIG.ShowPathVisuals then
+        clearMarkers()
+        return
+    end
+
     clearMarkers()
 
     local previousAttachment: Attachment? = nil
@@ -60,10 +94,11 @@ local function drawPath(waypoints: { PathWaypoint })
         marker.Anchored = true
         marker.CanCollide = false
         marker.CastShadow = false
-        marker.Color = PATH_VISUAL_COLOR
+        marker.Color = CONFIG.PathVisualColor
         marker.Material = Enum.Material.Neon
         marker.Shape = Enum.PartType.Ball
-        marker.Size = Vector3.new(0.75, 0.75, 0.75)
+        local markerSize = CONFIG.PathMarkerSize
+        marker.Size = Vector3.new(markerSize, markerSize, markerSize)
         marker.CFrame = CFrame.new(waypoint.Position)
         marker.Name = "Waypoint"
         marker.Parent = markerFolder
@@ -75,10 +110,10 @@ local function drawPath(waypoints: { PathWaypoint })
             local beam = Instance.new("Beam")
             beam.Attachment0 = previousAttachment
             beam.Attachment1 = attachment
-            beam.Color = ColorSequence.new(PATH_VISUAL_COLOR)
-            beam.Width0 = 0.15
-            beam.Width1 = 0.15
-            beam.Transparency = NumberSequence.new(0.2)
+            beam.Color = ColorSequence.new(CONFIG.PathVisualColor)
+            beam.Width0 = CONFIG.PathBeamWidth
+            beam.Width1 = CONFIG.PathBeamWidth
+            beam.Transparency = NumberSequence.new(CONFIG.PathVisualTransparency)
             beam.FaceCamera = true
             beam.LightEmission = 1
             beam.Parent = marker
@@ -125,7 +160,7 @@ local function computeTargetPosition(player: Player): Vector3?
     end
 
     offsetDirection = offsetDirection.Unit
-    return hrp.Position - offsetDirection * DESIRED_DISTANCE
+    return hrp.Position - offsetDirection * CONFIG.DesiredDistance
 end
 
 local function onStep()
@@ -148,7 +183,7 @@ local function onStep()
     end
 
     local currentDistance = (hrp.Position - root.Position).Magnitude
-    if math.abs(currentDistance - DESIRED_DISTANCE) <= DISTANCE_TOLERANCE then
+    if math.abs(currentDistance - CONFIG.DesiredDistance) <= CONFIG.DistanceTolerance then
         humanoid:MoveTo(root.Position)
         clearMarkers()
         return
@@ -172,7 +207,7 @@ local function onStep()
     local path = PathfindingService:CreatePath({
         AgentHeight = agentHeight,
         AgentRadius = agentRadius,
-        AgentCanJump = true,
+        AgentCanJump = CONFIG.AgentCanJump,
     })
 
     path:ComputeAsync(root.Position, targetPosition)
@@ -181,7 +216,7 @@ local function onStep()
     if path.Status ~= Enum.PathStatus.Success or #waypoints == 0 then
         clearMarkers()
         humanoid:MoveTo(targetPosition)
-        waitForMove(PATH_REFRESH)
+        waitForMove(CONFIG.PathRefreshSeconds)
         return
     end
 
@@ -196,10 +231,10 @@ local function onStep()
         end
 
         humanoid:MoveTo(waypoint.Position)
-        local reached = waitForMove(PATH_REFRESH)
+        local reached = waitForMove(CONFIG.PathRefreshSeconds)
 
         local updatedDistance = (hrp.Position - root.Position).Magnitude
-        if math.abs(updatedDistance - DESIRED_DISTANCE) <= DISTANCE_TOLERANCE then
+        if math.abs(updatedDistance - CONFIG.DesiredDistance) <= CONFIG.DistanceTolerance then
             break
         end
 
@@ -207,12 +242,12 @@ local function onStep()
             break
         end
 
-        if os.clock() - pathStart > MAX_PATH_TIME then
+        if os.clock() - pathStart > CONFIG.MaxPathTime then
             break
         end
     end
 end
 
-while task.wait(PATH_REFRESH) do
+while task.wait(CONFIG.PathRefreshSeconds) do
     onStep()
 end
