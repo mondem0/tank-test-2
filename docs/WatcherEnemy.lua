@@ -11,14 +11,41 @@ if not watcherModel then
     return
 end
 
-local humanoid: Humanoid = watcherModel:WaitForChild("Humanoid")
-local root: BasePart = watcherModel:WaitForChild("HumanoidRootPart")
+local function findRootPart(model: Model): BasePart?
+    if model.PrimaryPart then
+        return model.PrimaryPart
+    end
+
+    local candidate = model:FindFirstChild("HumanoidRootPart")
+    if candidate and candidate:IsA("BasePart") then
+        model.PrimaryPart = candidate
+        return candidate
+    end
+
+    for _, child in ipairs(model:GetChildren()) do
+        if child:IsA("BasePart") then
+            model.PrimaryPart = child
+            return child
+        end
+    end
+
+    return nil
+end
+
+local root = findRootPart(watcherModel)
+if not root then
+    warn("Watcher script requires the model to contain a BasePart to move")
+    return
+end
+
+local rootHalfHeight = root.Size.Y * 0.5
+local POSITION_EPSILON = math.max(root.Size.Magnitude * 0.1, 0.5)
 
 local DEFAULT_CONFIG = {
     StopDistance = 4,
     PathRefreshSeconds = 0.5,
     MaxPathTime = 2,
-    WalkSpeed = humanoid.WalkSpeed,
+    MoveSpeed = 12,
     AgentCanJump = true,
     ViewConeAngle = 55,
     RequireLineOfSight = true,
@@ -27,9 +54,12 @@ local DEFAULT_CONFIG = {
     PathBeamWidth = 0.12,
     PathVisualTransparency = 0.3,
     PathVisualColor = Color3.fromRGB(160, 60, 255),
+    GroundOffset = rootHalfHeight,
 }
 
 local CONFIG = table.clone(DEFAULT_CONFIG)
+
+type ConfigKey = typeof(DEFAULT_CONFIG)
 
 local function getAttributeOrDefault(attributeName: string, defaultValue)
     local attributeValue = watcherModel:GetAttribute(attributeName)
@@ -41,11 +71,9 @@ local function getAttributeOrDefault(attributeName: string, defaultValue)
 end
 
 local function refreshConfig()
-    for key, defaultValue in pairs(DEFAULT_CONFIG) do
+    for key, defaultValue in pairs(DEFAULT_CONFIG :: ConfigKey) do
         CONFIG[key] = getAttributeOrDefault(key, defaultValue)
     end
-
-    humanoid.WalkSpeed = CONFIG.WalkSpeed
 end
 
 refreshConfig()
@@ -180,165 +208,226 @@ local function anyPlayerIsWatching(): boolean
     return false
 end
 
+local function projectToGround(position: Vector3, extraExclude: Instance?): Vector3
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    if extraExclude then
+        params.FilterDescendantsInstances = { watcherModel, extraExclude }
+    else
+        params.FilterDescendantsInstances = { watcherModel }
+    end
+
+    local rayOrigin = position + Vector3.new(0, CONFIG.GroundOffset * 2, 0)
+    local result = Workspace:Raycast(rayOrigin, Vector3.new(0, -CONFIG.GroundOffset * 4, 0), params)
+    if result then
+        return Vector3.new(position.X, result.Position.Y + CONFIG.GroundOffset, position.Z)
+    end
+
+    return position
+end
+
 local activeWaypoints: { PathWaypoint }? = nil
-local activeWaypointIndex = 0
+local activeWaypointIndex = 2
+local desiredTargetPosition: Vector3? = nil
 local pathExpiresAt = 0
 local isComputingPath = false
-local pendingJumpRequest = false
+local lastStepTime = 0
+local immediateRepathRequested = false
+local lastLookDirection = root.CFrame.LookVector
 
-local groundedStates = {
-    [Enum.HumanoidStateType.Running] = true,
-    [Enum.HumanoidStateType.RunningNoPhysics] = true,
-    [Enum.HumanoidStateType.Landed] = true,
-}
-
-local function tryPerformPendingJump()
-    if not pendingJumpRequest then
-        return
+local function moveTowardsPosition(targetPosition: Vector3, dt: number): boolean
+    local currentPosition = root.Position
+    local delta = targetPosition - currentPosition
+    if delta.Magnitude <= POSITION_EPSILON then
+        local horizontal = Vector3.new(lastLookDirection.X, 0, lastLookDirection.Z)
+        if horizontal.Magnitude < 0.001 then
+            horizontal = Vector3.new(0, 0, -1)
+        end
+        local lookAt = CFrame.lookAt(targetPosition, targetPosition + horizontal.Unit)
+        root:PivotTo(lookAt)
+        return true
     end
 
-    if humanoid.FloorMaterial == Enum.Material.Air then
-        return
+    local moveDistance = math.min(CONFIG.MoveSpeed * dt, delta.Magnitude)
+    if moveDistance <= 0 then
+        return false
     end
 
-    humanoid.Jump = true
-    humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-    pendingJumpRequest = false
+    local direction = delta.Unit
+    local horizontal = Vector3.new(direction.X, 0, direction.Z)
+    if horizontal.Magnitude < 0.001 then
+        horizontal = Vector3.new(lastLookDirection.X, 0, lastLookDirection.Z)
+        if horizontal.Magnitude < 0.001 then
+            horizontal = Vector3.new(0, 0, -1)
+        end
+    else
+        lastLookDirection = horizontal.Unit
+    end
+
+    local newPosition = currentPosition + direction * moveDistance
+    local lookAt = CFrame.lookAt(newPosition, newPosition + horizontal.Unit)
+    root:PivotTo(lookAt)
+
+    return false
 end
 
-humanoid.StateChanged:Connect(function(_, newState)
-    if groundedStates[newState] then
-        tryPerformPendingJump()
-    end
-end)
+local function beginFollowingPath(waypoints: { PathWaypoint }, targetPosition: Vector3)
+    activeWaypoints = waypoints
+    activeWaypointIndex = math.min(2, #waypoints)
+    desiredTargetPosition = targetPosition
+    pathExpiresAt = os.clock() + CONFIG.MaxPathTime
 
-local function followNextWaypoint()
-    if not activeWaypoints then
-        return
-    end
-
-    local nextIndex = activeWaypointIndex + 1
-    if nextIndex > #activeWaypoints then
-        activeWaypoints = nil
-        pendingJumpRequest = false
-        clearMarkers()
-        return
-    end
-
-    activeWaypointIndex = nextIndex
-    local waypoint = activeWaypoints[nextIndex]
-
-    if waypoint.Action == Enum.PathWaypointAction.Jump then
-        pendingJumpRequest = true
-        tryPerformPendingJump()
-    end
-
-    humanoid:MoveTo(waypoint.Position)
+    drawPath(waypoints)
 end
 
-humanoid.MoveToFinished:Connect(function(reached)
-    if not activeWaypoints then
-        pendingJumpRequest = false
-        return
-    end
-
-    if not reached then
-        activeWaypoints = nil
-        pendingJumpRequest = false
-        pathExpiresAt = 0
-        clearMarkers()
-        return
-    end
-
-    followNextWaypoint()
-end)
-
-local function computePath(targetPosition: Vector3)
+local function computePathAsync(targetPosition: Vector3)
     if isComputingPath then
         return
     end
 
     isComputingPath = true
 
-    local path = PathfindingService:CreatePath({
-        AgentCanJump = CONFIG.AgentCanJump,
-    })
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local agentHeight = math.max(root.Size.Y, CONFIG.GroundOffset * 2)
+            local agentRadius = math.max(root.Size.X * 0.5, root.Size.Z * 0.5, 2)
 
-    path:ComputeAsync(root.Position, targetPosition)
+            local path = PathfindingService:CreatePath({
+                AgentHeight = agentHeight,
+                AgentRadius = agentRadius,
+                AgentCanJump = CONFIG.AgentCanJump,
+            })
 
-    isComputingPath = false
+            path:ComputeAsync(root.Position, targetPosition)
+            local waypoints = path:GetWaypoints()
 
-    if path.Status ~= Enum.PathStatus.Success then
-        activeWaypoints = nil
-        pendingJumpRequest = false
-        clearMarkers()
-        humanoid:MoveTo(targetPosition)
-        pathExpiresAt = tick() + CONFIG.PathRefreshSeconds
-        return
-    end
+            if path.Status == Enum.PathStatus.Success and #waypoints >= 2 then
+                beginFollowingPath(waypoints, targetPosition)
+            else
+                activeWaypoints = nil
+                desiredTargetPosition = targetPosition
+                clearMarkers()
+            end
+        end)
 
-    activeWaypoints = path:GetWaypoints()
-    activeWaypointIndex = 0
-    pendingJumpRequest = false
-    pathExpiresAt = tick() + CONFIG.MaxPathTime
+        if not ok then
+            warn(string.format("Watcher path computation failed: %s", tostring(err)))
+            activeWaypoints = nil
+            desiredTargetPosition = targetPosition
+            clearMarkers()
+        end
 
-    drawPath(activeWaypoints)
-    followNextWaypoint()
+        isComputingPath = false
+    end)
 end
 
-RunService.Heartbeat:Connect(function()
-    if humanoid.Health <= 0 then
-        activeWaypoints = nil
-        clearMarkers()
+local function updateMovement(dt: number)
+    if activeWaypoints then
+        if os.clock() >= pathExpiresAt then
+            activeWaypoints = nil
+            immediateRepathRequested = true
+            clearMarkers()
+            return
+        end
+
+        local waypoint = activeWaypoints[activeWaypointIndex]
+        if not waypoint then
+            activeWaypoints = nil
+            desiredTargetPosition = nil
+            clearMarkers()
+            return
+        end
+
+        if moveTowardsPosition(waypoint.Position, dt) then
+            activeWaypointIndex += 1
+            if activeWaypointIndex > #activeWaypoints then
+                activeWaypoints = nil
+                desiredTargetPosition = nil
+                clearMarkers()
+            end
+        end
+
         return
     end
 
+    if desiredTargetPosition then
+        if moveTowardsPosition(desiredTargetPosition, dt) then
+            desiredTargetPosition = nil
+        end
+    end
+end
+
+local function onStep()
     local targetPlayer = findClosestPlayer()
     if not targetPlayer then
         activeWaypoints = nil
+        desiredTargetPosition = nil
+        immediateRepathRequested = false
         clearMarkers()
         return
     end
 
     local character = targetPlayer.Character
     local hrp = character and character:FindFirstChild("HumanoidRootPart")
-
     if not character or not hrp then
-        activeWaypoints = nil
-        clearMarkers()
         return
     end
 
     if anyPlayerIsWatching() then
-        if activeWaypoints then
-            activeWaypoints = nil
-            pendingJumpRequest = false
-            clearMarkers()
-        end
-
-        humanoid:MoveTo(root.Position)
+        activeWaypoints = nil
+        desiredTargetPosition = nil
+        immediateRepathRequested = false
+        clearMarkers()
         return
     end
 
     local distance = (hrp.Position - root.Position).Magnitude
     if distance <= CONFIG.StopDistance then
-        if activeWaypoints then
-            activeWaypoints = nil
-            pendingJumpRequest = false
-            clearMarkers()
-        end
-
-        humanoid:MoveTo(root.Position)
-        return
-    end
-
-    local now = tick()
-    if now >= pathExpiresAt then
         activeWaypoints = nil
-    end
-
-    if not activeWaypoints then
-        computePath(hrp.Position)
+        desiredTargetPosition = nil
+        clearMarkers()
+        lastLookDirection = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
         return
     end
+
+    local targetPosition = projectToGround(hrp.Position, character)
+
+    local needsRepath = false
+
+    if not activeWaypoints and not desiredTargetPosition then
+        needsRepath = true
+    elseif desiredTargetPosition and (targetPosition - desiredTargetPosition).Magnitude > POSITION_EPSILON then
+        needsRepath = true
+    elseif os.clock() >= pathExpiresAt then
+        needsRepath = true
+    end
+
+    if immediateRepathRequested then
+        needsRepath = true
+        immediateRepathRequested = false
+    end
+
+    if needsRepath then
+        computePathAsync(targetPosition)
+    elseif not activeWaypoints and desiredTargetPosition then
+        desiredTargetPosition = targetPosition
+    end
+
+    if not activeWaypoints and not desiredTargetPosition then
+        desiredTargetPosition = targetPosition
+    end
+end
+
+RunService.Heartbeat:Connect(function(dt)
+    if dt <= 0 then
+        return
+    end
+
+    local now = os.clock()
+    if now - lastStepTime >= CONFIG.PathRefreshSeconds then
+        lastStepTime = now
+        onStep()
+    end
+
+    updateMovement(dt)
 end)
