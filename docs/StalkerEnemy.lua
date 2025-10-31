@@ -3,6 +3,7 @@
 local Players = game:GetService("Players")
 local PathfindingService = game:GetService("PathfindingService")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
 local stalkerModel = script.Parent
 if not stalkerModel then
@@ -27,6 +28,10 @@ local DEFAULT_CONFIG = {
 }
 
 local CONFIG = table.clone(DEFAULT_CONFIG)
+
+local groundRayParams = RaycastParams.new()
+groundRayParams.FilterType = Enum.RaycastFilterType.Exclude
+groundRayParams.FilterDescendantsInstances = { stalkerModel }
 
 local function getAttributeOrDefault(attributeName: string, defaultValue)
     local attributeValue = stalkerModel:GetAttribute(attributeName)
@@ -125,23 +130,43 @@ end
 
 local function computeTargetPosition(player: Player): Vector3?
     local character = player.Character
+    if character then
+        groundRayParams.FilterDescendantsInstances = { stalkerModel, character }
+    else
+        groundRayParams.FilterDescendantsInstances = { stalkerModel }
+    end
     local hrp = character and character:FindFirstChild("HumanoidRootPart")
     if not hrp then
         return nil
     end
 
-    local offsetDirection = hrp.Position - root.Position
-    if offsetDirection.Magnitude < 0.5 then
+    local rootPosition = root.Position
+    local horizontalOffset = Vector3.new(hrp.Position.X - rootPosition.X, 0, hrp.Position.Z - rootPosition.Z)
+
+    if horizontalOffset.Magnitude < 0.5 then
         local lookVector = hrp.CFrame.LookVector
-        if lookVector.Magnitude > 0.1 then
-            offsetDirection = lookVector
-        else
-            offsetDirection = Vector3.new(0, 0, -1)
+        horizontalOffset = Vector3.new(lookVector.X, 0, lookVector.Z)
+        if horizontalOffset.Magnitude < 0.1 then
+            horizontalOffset = Vector3.new(0, 0, -1)
         end
     end
 
-    offsetDirection = offsetDirection.Unit
-    return hrp.Position - offsetDirection * CONFIG.DesiredDistance
+    local direction = horizontalOffset.Unit
+    local desiredPosition = Vector3.new(hrp.Position.X, rootPosition.Y, hrp.Position.Z) - direction * CONFIG.DesiredDistance
+
+    local rayOrigin = desiredPosition + Vector3.new(0, CONFIG.DesiredDistance, 0)
+    local raycastResult = Workspace:Raycast(rayOrigin, Vector3.new(0, -CONFIG.DesiredDistance * 4, 0), groundRayParams)
+    if raycastResult then
+        desiredPosition = Vector3.new(desiredPosition.X, raycastResult.Position.Y + humanoid.HipHeight, desiredPosition.Z)
+    else
+        desiredPosition = Vector3.new(desiredPosition.X, rootPosition.Y, desiredPosition.Z)
+    end
+
+    if math.abs(hrp.Position.Y - desiredPosition.Y) > 6 then
+        desiredPosition = Vector3.new(desiredPosition.X, hrp.Position.Y, desiredPosition.Z)
+    end
+
+    return desiredPosition
 end
 
 local activeWaypoints: { PathWaypoint }? = nil
@@ -150,6 +175,7 @@ local desiredTargetPosition: Vector3? = nil
 local pathExpiresAt = 0
 local isComputingPath = false
 local lastStepTime = 0
+local immediateRepathRequested = false
 
 local function followNextWaypoint()
     if not activeWaypoints then
@@ -182,6 +208,7 @@ humanoid.MoveToFinished:Connect(function(reached)
         followNextWaypoint()
     else
         activeWaypoints = nil
+        immediateRepathRequested = true
     end
 end)
 
@@ -287,6 +314,11 @@ local function onStep()
         needsRepath = true
     elseif desiredTargetPosition and (targetPosition - desiredTargetPosition).Magnitude > CONFIG.DistanceTolerance then
         needsRepath = true
+    end
+
+    if immediateRepathRequested then
+        needsRepath = true
+        immediateRepathRequested = false
     end
 
     if needsRepath then
