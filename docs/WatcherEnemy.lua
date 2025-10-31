@@ -38,9 +38,10 @@ if not root then
     return
 end
 
-local rootHalfHeight = root.Size.Y * 0.5
-local horizontalFootprint = math.max(root.Size.X, root.Size.Z, 1)
-local POSITION_EPSILON = math.clamp(horizontalFootprint * 0.25, 0.5, 4)
+local modelExtents = watcherModel:GetExtentsSize()
+local horizontalFootprint = math.max(modelExtents.X, modelExtents.Z, root.Size.X, root.Size.Z, 1)
+local rootHalfHeight = math.max(modelExtents.Y * 0.5, root.Size.Y * 0.5)
+local POSITION_EPSILON = math.clamp(horizontalFootprint * 0.3, 0.75, horizontalFootprint)
 
 local DEFAULT_CONFIG = {
     StopDistance = 4,
@@ -102,39 +103,65 @@ local function drawPath(waypoints: { PathWaypoint })
     clearMarkers()
 
     local previousAttachment: Attachment? = nil
+    local previousPosition = root.Position
 
     for _, waypoint in ipairs(waypoints) do
-        local marker = Instance.new("Part")
-        marker.Anchored = true
-        marker.CanCollide = false
-        marker.CastShadow = false
-        marker.Color = CONFIG.PathVisualColor
-        marker.Material = Enum.Material.Neon
-        marker.Shape = Enum.PartType.Ball
-        local markerSize = CONFIG.PathMarkerSize
-        marker.Size = Vector3.new(markerSize, markerSize, markerSize)
-        marker.CFrame = CFrame.new(waypoint.Position)
-        marker.Name = "Waypoint"
-        marker.Parent = markerFolder
+        if (waypoint.Position - previousPosition).Magnitude > POSITION_EPSILON * 0.5 then
+            local marker = Instance.new("Part")
+            marker.Anchored = true
+            marker.CanCollide = false
+            marker.CastShadow = false
+            marker.Color = CONFIG.PathVisualColor
+            marker.Material = Enum.Material.Neon
+            marker.Shape = Enum.PartType.Ball
+            local markerSize = CONFIG.PathMarkerSize
+            marker.Size = Vector3.new(markerSize, markerSize, markerSize)
+            marker.CFrame = CFrame.new(waypoint.Position)
+            marker.Name = "Waypoint"
+            marker.Parent = markerFolder
 
-        local attachment = Instance.new("Attachment")
-        attachment.Parent = marker
+            local attachment = Instance.new("Attachment")
+            attachment.Parent = marker
 
-        if previousAttachment then
-            local beam = Instance.new("Beam")
-            beam.Attachment0 = previousAttachment
-            beam.Attachment1 = attachment
-            beam.Color = ColorSequence.new(CONFIG.PathVisualColor)
-            beam.Width0 = CONFIG.PathBeamWidth
-            beam.Width1 = CONFIG.PathBeamWidth
-            beam.Transparency = NumberSequence.new(CONFIG.PathVisualTransparency)
-            beam.FaceCamera = true
-            beam.LightEmission = 1
-            beam.Parent = marker
+            if previousAttachment then
+                local beam = Instance.new("Beam")
+                beam.Attachment0 = previousAttachment
+                beam.Attachment1 = attachment
+                beam.Color = ColorSequence.new(CONFIG.PathVisualColor)
+                beam.Width0 = CONFIG.PathBeamWidth
+                beam.Width1 = CONFIG.PathBeamWidth
+                beam.Transparency = NumberSequence.new(CONFIG.PathVisualTransparency)
+                beam.FaceCamera = true
+                beam.LightEmission = 1
+                beam.Parent = marker
+            end
+
+            previousAttachment = attachment
+            previousPosition = waypoint.Position
         end
-
-        previousAttachment = attachment
     end
+end
+
+local function sanitizeWaypoints(waypoints: { PathWaypoint }): { PathWaypoint }
+    if #waypoints == 0 then
+        return waypoints
+    end
+
+    local sanitized = {}
+    local lastPosition = root.Position
+
+    for _, waypoint in ipairs(waypoints) do
+        if (waypoint.Position - lastPosition).Magnitude > POSITION_EPSILON * 0.5 then
+            table.insert(sanitized, waypoint)
+            lastPosition = waypoint.Position
+        end
+    end
+
+    if #sanitized == 0 then
+        table.insert(sanitized, waypoints[#waypoints])
+    end
+
+    return sanitized
 end
 
 local function findClosestPlayer(): Player?
@@ -228,7 +255,7 @@ local function projectToGround(position: Vector3, extraExclude: Instance?): Vect
 end
 
 local activeWaypoints: { PathWaypoint }? = nil
-local activeWaypointIndex = 2
+local activeWaypointIndex = 1
 local desiredTargetPosition: Vector3? = nil
 local pathExpiresAt = 0
 local isComputingPath = false
@@ -274,7 +301,7 @@ end
 
 local function beginFollowingPath(waypoints: { PathWaypoint }, targetPosition: Vector3)
     activeWaypoints = waypoints
-    activeWaypointIndex = math.min(2, #waypoints)
+    activeWaypointIndex = 1
     desiredTargetPosition = targetPosition
     pathExpiresAt = os.clock() + CONFIG.MaxPathTime
 
@@ -290,8 +317,9 @@ local function computePathAsync(targetPosition: Vector3)
 
     task.spawn(function()
         local ok, err = pcall(function()
-            local agentHeight = math.max(root.Size.Y, CONFIG.GroundOffset * 2)
-            local agentRadius = math.max(root.Size.X * 0.5, root.Size.Z * 0.5, 2)
+            local agentHeight = math.max(modelExtents.Y, root.Size.Y, CONFIG.GroundOffset * 2)
+            local maxWidth = math.max(modelExtents.X, modelExtents.Z, root.Size.X, root.Size.Z)
+            local agentRadius = math.max(maxWidth * 0.5, 2)
 
             local path = PathfindingService:CreatePath({
                 AgentHeight = agentHeight,
@@ -300,10 +328,16 @@ local function computePathAsync(targetPosition: Vector3)
             })
 
             path:ComputeAsync(root.Position, targetPosition)
-            local waypoints = path:GetWaypoints()
+            local waypoints = sanitizeWaypoints(path:GetWaypoints())
 
-            if path.Status == Enum.PathStatus.Success and #waypoints >= 2 then
-                beginFollowingPath(waypoints, targetPosition)
+            if path.Status == Enum.PathStatus.Success then
+                if #waypoints >= 1 then
+                    beginFollowingPath(waypoints, targetPosition)
+                else
+                    activeWaypoints = nil
+                    desiredTargetPosition = targetPosition
+                    clearMarkers()
+                end
             else
                 activeWaypoints = nil
                 desiredTargetPosition = targetPosition
@@ -399,7 +433,7 @@ local function onStep()
         needsRepath = true
     elseif desiredTargetPosition and (targetPosition - desiredTargetPosition).Magnitude > POSITION_EPSILON then
         needsRepath = true
-    elseif os.clock() >= pathExpiresAt then
+    elseif activeWaypoints and os.clock() >= pathExpiresAt then
         needsRepath = true
     end
 

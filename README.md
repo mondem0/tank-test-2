@@ -23,7 +23,7 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
      - `PathVisualTransparency` *(NumberValue 0-1, default 0.2)* – Transparency of the beams.
      - `PathVisualColor` *(Color3Value, default RGB 255,170,0)* – Color used for both waypoint markers and beams.
      - `AgentCanJump` *(BoolValue, default true)* – Whether the computed path is allowed to include jumps.
-     - `GroundOffset` *(NumberValue, default half the root part's height)* – Vertical offset applied when snapping destinations to the ground.
+    - `GroundOffset` *(NumberValue, default half the taller of the primary part or entire model)* – Vertical offset applied when snapping destinations to the ground.
    - The script listens for attribute changes at runtime, so you can tweak values live during a Studio playtest.
 
 3. **Insert the script**
@@ -52,7 +52,7 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
 - The script assumes the NPC has enough room to pathfind. Place a `NavigationMesh` or set your workspace terrain settings if your experience uses custom navigation agents.
 - Because the script runs on the server it will guide the NPC consistently for all players.
 - For large experiences consider adding throttling or using `PathfindingService:CreatePath` with customized agent parameters to better match your enemy's collision size.
-- The waypoint arrival tolerance automatically scales with the model's horizontal footprint (not its height), preventing tall monsters from spinning in place while they try to reach a new path.
+- The script measures the footprint using the entire model's bounding box and drops zero-length waypoints, so oversized monsters don't spin in place or spawn their first marker inside themselves before setting off.
 
 ## Roblox "Watcher" Enemy AI
 
@@ -78,7 +78,7 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
      - `PathBeamWidth` *(NumberValue, default 0.12)* – Thickness of the neon beams between waypoints.
      - `PathVisualTransparency` *(NumberValue 0-1, default 0.3)* – Transparency of the waypoint visuals.
      - `PathVisualColor` *(Color3Value, default RGB 160,60,255)* – Tint used for the watcher’s path effects.
-     - `GroundOffset` *(NumberValue, default half the root part's height)* – Vertical offset applied when snapping destinations to the ground.
+    - `GroundOffset` *(NumberValue, default half the taller of the primary part or entire model)* – Vertical offset applied when snapping destinations to the ground.
    - Attribute changes apply immediately while testing, so you can tweak the watcher without editing the Script.
 
 3. **Insert the script**
@@ -105,4 +105,4 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
 - Because observation checks run every heartbeat on the server, the watcher reacts immediately to players looking at it even in multiplayer sessions.
 - If `RequireLineOfSight` is disabled, the watcher will also freeze when players stare at it through walls, which can be useful for simple horror setups.
 - Pairing the watcher with the stalker enemy lets you create varied pressure—one hovers at a distance, while the other advances only when nobody keeps an eye on it.
-- Just like the stalker, the watcher bases its waypoint completion radius on the model's horizontal size so oversized or tall rigs keep gliding forward instead of rotating in place at the start of a path.
+- Just like the stalker, the watcher now measures its footprint from the whole model and discards duplicate starting waypoints, keeping big rigs gliding forward instead of spinning at their first target.
