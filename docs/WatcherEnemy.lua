@@ -6,23 +6,23 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local watcherModel = script.Parent
-if not watcherModel then
-    warn("Watcher script must be parented under the NPC model")
+if not watcherModel or not watcherModel:IsA("Model") then
+    warn("Watcher enemy script must be parented to a Model")
     return
 end
 
-local function findRootPart(model: Model): BasePart?
-    if model.PrimaryPart then
+local function resolvePrimaryPart(model: Model): BasePart?
+    if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then
         return model.PrimaryPart
     end
 
-    local candidate = model:FindFirstChild("HumanoidRootPart")
-    if candidate and candidate:IsA("BasePart") then
-        model.PrimaryPart = candidate
-        return candidate
+    local humanoidRoot = model:FindFirstChild("HumanoidRootPart")
+    if humanoidRoot and humanoidRoot:IsA("BasePart") then
+        model.PrimaryPart = humanoidRoot
+        return humanoidRoot
     end
 
-    for _, child in ipairs(model:GetChildren()) do
+    for _, child in model:GetChildren() do
         if child:IsA("BasePart") then
             model.PrimaryPart = child
             return child
@@ -32,194 +32,319 @@ local function findRootPart(model: Model): BasePart?
     return nil
 end
 
-local root = findRootPart(watcherModel)
+local root = resolvePrimaryPart(watcherModel)
 if not root then
-    warn("Watcher script requires the model to contain a BasePart to move")
+    warn("Watcher enemy requires a PrimaryPart or any BasePart to move")
     return
 end
 
-local modelExtents = watcherModel:GetExtentsSize()
-local horizontalFootprint = math.max(modelExtents.X, modelExtents.Z, root.Size.X, root.Size.Z, 1)
-local rootHalfHeight = math.max(modelExtents.Y * 0.5, root.Size.Y * 0.5)
-local WAYPOINT_SPACING = math.clamp(horizontalFootprint * 0.2, 1, 3)
-local ARRIVAL_EPSILON = math.clamp(horizontalFootprint * 0.15, 0.75, 4)
+root.Anchored = true
 
-local DEFAULT_CONFIG = {
-    StopDistance = 4,
-    PathRefreshSeconds = 0.5,
-    MaxPathTime = 2,
-    MoveSpeed = 12,
+local _, boundsSize = watcherModel:GetBoundingBox()
+local horizontalFootprint = math.max(boundsSize.X, boundsSize.Z, 2)
+local modelHalfHeight = math.max(boundsSize.Y * 0.5, root.Size.Y * 0.5)
+local arrivalRadius = math.max(horizontalFootprint * 0.45, 1.5)
+local waypointSpacing = math.max(horizontalFootprint * 0.35, 1)
+
+local DEFAULTS = {
+    MoveSpeed = 10,
+    StopDistance = math.max(horizontalFootprint * 0.6, 4),
+    RepathInterval = 0.3,
+    RepathDistance = 5,
+    GroundOffset = modelHalfHeight,
+    AgentHeight = boundsSize.Y + 4,
+    AgentRadius = math.max(horizontalFootprint * 0.5, 2),
     AgentCanJump = true,
+    AgentMaxSlope = 35,
     ViewConeAngle = 55,
     RequireLineOfSight = true,
     ShowPathVisuals = true,
-    PathMarkerSize = 0.75,
-    PathBeamWidth = 0.12,
-    PathVisualTransparency = 0.3,
-    PathVisualColor = Color3.fromRGB(160, 60, 255),
-    GroundOffset = rootHalfHeight,
+    PathMarkerSize = math.max(horizontalFootprint * 0.25, 0.6),
+    PathBeamWidth = 0.18,
+    PathColor = Color3.fromRGB(160, 80, 255),
+    PathTransparency = 0.25,
 }
 
-local CONFIG = table.clone(DEFAULT_CONFIG)
+type Config = typeof(DEFAULTS)
+local CONFIG: Config = table.clone(DEFAULTS)
+local visionDotThreshold = math.cos(math.rad(CONFIG.ViewConeAngle * 0.5))
 
-type ConfigKey = typeof(DEFAULT_CONFIG)
+local pathMarkersFolder = Instance.new("Folder")
+pathMarkersFolder.Name = "PathMarkers"
+pathMarkersFolder.Parent = watcherModel
 
-local function getAttributeOrDefault(attributeName: string, defaultValue)
-    local attributeValue = watcherModel:GetAttribute(attributeName)
-    if attributeValue == nil then
+local groundRayParams = RaycastParams.new()
+groundRayParams.FilterType = Enum.RaycastFilterType.Exclude
+groundRayParams.FilterDescendantsInstances = { watcherModel }
+
+type AnyValue = any
+local function readAttribute(attributeName: string, defaultValue: AnyValue)
+    local value = watcherModel:GetAttribute(attributeName)
+    if value == nil then
         return defaultValue
     end
-
-    return attributeValue
+    return value
 end
 
 local function refreshConfig()
-    for key, defaultValue in pairs(DEFAULT_CONFIG :: ConfigKey) do
-        CONFIG[key] = getAttributeOrDefault(key, defaultValue)
+    for key, defaultValue in pairs(DEFAULTS) do
+        (CONFIG :: any)[key] = readAttribute(key, defaultValue)
     end
+
+    local cone = math.clamp(CONFIG.ViewConeAngle, 1, 179)
+    visionDotThreshold = math.cos(math.rad(cone * 0.5))
 end
 
 refreshConfig()
-
-for attributeName in pairs(DEFAULT_CONFIG) do
-    watcherModel:GetAttributeChangedSignal(attributeName):Connect(refreshConfig)
+for key in pairs(DEFAULTS) do
+    watcherModel:GetAttributeChangedSignal(key):Connect(refreshConfig)
 end
 
-local markerFolder = Instance.new("Folder")
-markerFolder.Name = "PathMarkers"
-markerFolder.Parent = watcherModel
-
 local function clearMarkers()
-    for _, child in ipairs(markerFolder:GetChildren()) do
+    for _, child in ipairs(pathMarkersFolder:GetChildren()) do
         child:Destroy()
     end
 end
 
-local function drawPath(waypoints: { PathWaypoint })
+local function renderPath(waypoints: { PathWaypoint })
     if not CONFIG.ShowPathVisuals then
         clearMarkers()
         return
     end
 
     clearMarkers()
-
     local previousAttachment: Attachment? = nil
-    local previousPosition = root.Position
 
     for _, waypoint in ipairs(waypoints) do
-        if (waypoint.Position - previousPosition).Magnitude > WAYPOINT_SPACING then
-            local marker = Instance.new("Part")
-            marker.Anchored = true
-            marker.CanCollide = false
-            marker.CastShadow = false
-            marker.Color = CONFIG.PathVisualColor
-            marker.Material = Enum.Material.Neon
-            marker.Shape = Enum.PartType.Ball
-            local markerSize = CONFIG.PathMarkerSize
-            marker.Size = Vector3.new(markerSize, markerSize, markerSize)
-            marker.CFrame = CFrame.new(waypoint.Position)
-            marker.Name = "Waypoint"
-            marker.Parent = markerFolder
+        local markerSize = CONFIG.PathMarkerSize
+        local marker = Instance.new("Part")
+        marker.Name = "Waypoint"
+        marker.Anchored = true
+        marker.CanCollide = false
+        marker.CastShadow = false
+        marker.Color = CONFIG.PathColor
+        marker.Material = Enum.Material.Neon
+        marker.Shape = Enum.PartType.Ball
+        marker.Transparency = CONFIG.PathTransparency
+        marker.Size = Vector3.new(markerSize, markerSize, markerSize)
+        marker.CFrame = CFrame.new(waypoint.Position)
+        marker.Parent = pathMarkersFolder
 
-            local attachment = Instance.new("Attachment")
-            attachment.Parent = marker
+        local attachment = Instance.new("Attachment")
+        attachment.Parent = marker
 
-            if previousAttachment then
-                local beam = Instance.new("Beam")
-                beam.Attachment0 = previousAttachment
-                beam.Attachment1 = attachment
-                beam.Color = ColorSequence.new(CONFIG.PathVisualColor)
-                beam.Width0 = CONFIG.PathBeamWidth
-                beam.Width1 = CONFIG.PathBeamWidth
-                beam.Transparency = NumberSequence.new(CONFIG.PathVisualTransparency)
-                beam.FaceCamera = true
-                beam.LightEmission = 1
-                beam.Parent = marker
-            end
-
-            previousAttachment = attachment
-            previousPosition = waypoint.Position
+        if previousAttachment then
+            local beam = Instance.new("Beam")
+            beam.Attachment0 = previousAttachment
+            beam.Attachment1 = attachment
+            beam.Color = ColorSequence.new(CONFIG.PathColor)
+            beam.Width0 = CONFIG.PathBeamWidth
+            beam.Width1 = CONFIG.PathBeamWidth
+            beam.Transparency = NumberSequence.new(CONFIG.PathTransparency)
+            beam.FaceCamera = true
+            beam.LightEmission = 1
+            beam.Parent = marker
         end
+
+        previousAttachment = attachment
     end
 end
 
-local function sanitizeWaypoints(waypoints: { PathWaypoint }): { PathWaypoint }
+local lastFacing = root.CFrame.LookVector
+local activeWaypoints: { PathWaypoint } = {}
+local currentWaypointIndex = 1
+local lastDestination: Vector3? = nil
+local lastPathCompute = 0
+
+local function trimWaypoints(waypoints: { PathWaypoint }, startPosition: Vector3): { PathWaypoint }
     if #waypoints == 0 then
-        return waypoints
+        return {
+            {
+                Position = startPosition,
+                Action = Enum.PathWaypointAction.Walk,
+            },
+        }
     end
 
-    local sanitized = {}
-    local lastPosition = root.Position
+    local trimmed: { PathWaypoint } = {}
+    local previous = startPosition
 
-    for _, waypoint in ipairs(waypoints) do
-        if (waypoint.Position - lastPosition).Magnitude > WAYPOINT_SPACING then
-            table.insert(sanitized, waypoint)
-            lastPosition = waypoint.Position
+    for index, waypoint in ipairs(waypoints) do
+        local distance = (waypoint.Position - previous).Magnitude
+        if distance >= waypointSpacing or index == #waypoints then
+            table.insert(trimmed, waypoint)
+            previous = waypoint.Position
         end
     end
 
-    if #sanitized == 0 then
-        table.insert(sanitized, waypoints[#waypoints])
+    if #trimmed == 0 then
+        table.insert(trimmed, {
+            Position = waypoints[#waypoints].Position,
+            Action = Enum.PathWaypointAction.Walk,
+        })
     end
 
-    return sanitized
+    return trimmed
 end
 
-local function findClosestPlayer(): Player?
-    local closestPlayer: Player? = nil
-    local shortestDistance = math.huge
+local function ensureGrounded(position: Vector3): Vector3
+    local rayOrigin = position + Vector3.new(0, CONFIG.GroundOffset * 2, 0)
+    local rayDirection = Vector3.new(0, -CONFIG.GroundOffset * 4, 0)
+    local result = Workspace:Raycast(rayOrigin, rayDirection, groundRayParams)
+    if result then
+        return Vector3.new(position.X, result.Position.Y, position.Z)
+    end
+
+    return Vector3.new(position.X, position.Y, position.Z)
+end
+
+local function computePath(destination: Vector3)
+    local path = PathfindingService:CreatePath({
+        AgentRadius = CONFIG.AgentRadius,
+        AgentHeight = CONFIG.AgentHeight,
+        AgentCanJump = CONFIG.AgentCanJump,
+        AgentMaxSlope = CONFIG.AgentMaxSlope,
+    })
+
+    local ok, err = pcall(function()
+        path:ComputeAsync(root.Position, destination)
+    end)
+
+    local success = ok and path.Status == Enum.PathStatus.Success
+    local waypoints = success and path:GetWaypoints() or nil
+
+    if not success or not waypoints then
+        activeWaypoints = {
+            {
+                Position = destination,
+                Action = Enum.PathWaypointAction.Walk,
+            },
+        }
+        currentWaypointIndex = 1
+        renderPath(activeWaypoints)
+        lastDestination = destination
+        lastPathCompute = os.clock()
+        return
+    end
+
+    local trimmed = trimWaypoints(waypoints, root.Position)
+    if #trimmed > 0 and (trimmed[1].Position - root.Position).Magnitude < waypointSpacing then
+        table.remove(trimmed, 1)
+    end
+
+    if #trimmed == 0 then
+        trimmed = {
+            {
+                Position = destination,
+                Action = Enum.PathWaypointAction.Walk,
+            },
+        }
+    end
+
+    activeWaypoints = trimmed
+    currentWaypointIndex = 1
+    renderPath(activeWaypoints)
+    lastDestination = destination
+    lastPathCompute = os.clock()
+end
+
+local function planarDistance(a: Vector3, b: Vector3): number
+    local delta = a - b
+    return Vector3.new(delta.X, 0, delta.Z).Magnitude
+end
+
+local function updateFacing(moveDirection: Vector3)
+    local planar = Vector3.new(moveDirection.X, 0, moveDirection.Z)
+    if planar.Magnitude > 0.1 then
+        lastFacing = planar.Unit
+    end
+end
+
+local function moveAlongPath(dt: number)
+    local waypoint = activeWaypoints[currentWaypointIndex]
+    if not waypoint then
+        return
+    end
+
+    local walkwayPosition = ensureGrounded(waypoint.Position)
+    local targetPosition = walkwayPosition + Vector3.new(0, CONFIG.GroundOffset, 0)
+    local currentPosition = root.Position
+    local delta = targetPosition - currentPosition
+    local horizontalDistance = planarDistance(targetPosition, currentPosition)
+    local verticalDistance = math.abs(delta.Y)
+
+    if horizontalDistance <= arrivalRadius and verticalDistance <= CONFIG.GroundOffset * 1.5 then
+        currentWaypointIndex += 1
+        return
+    end
+
+    local moveSpeed = math.max(CONFIG.MoveSpeed, 0)
+    if moveSpeed <= 0 then
+        return
+    end
+
+    local stepDistance = moveSpeed * dt
+    if stepDistance <= 0 then
+        return
+    end
+
+    local distanceToWaypoint = delta.Magnitude
+    if distanceToWaypoint < 1e-4 then
+        currentWaypointIndex += 1
+        return
+    end
+
+    local direction = delta / distanceToWaypoint
+    updateFacing(direction)
+
+    local travel = math.min(stepDistance, distanceToWaypoint)
+    local newPosition = currentPosition + direction * travel
+    local lookVector = lastFacing.Magnitude > 0 and lastFacing or Vector3.new(0, 0, -1)
+    local pivotCFrame = CFrame.lookAt(newPosition, newPosition + lookVector, Vector3.new(0, 1, 0))
+    watcherModel:PivotTo(pivotCFrame)
+end
+
+local function findClosestPlayerRoot(): BasePart?
+    local closest: BasePart? = nil
+    local closestDistance = math.huge
 
     for _, player in ipairs(Players:GetPlayers()) do
         local character = player.Character
-        local hrp = character and character:FindFirstChild("HumanoidRootPart")
-        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-
-        if character and hrp and humanoid and humanoid.Health > 0 then
-            local distance = (hrp.Position - root.Position).Magnitude
-            if distance < shortestDistance then
-                shortestDistance = distance
-                closestPlayer = player
+        if character then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            if humanoid and humanoid.Health > 0 and hrp and hrp:IsA("BasePart") then
+                local distance = (hrp.Position - root.Position).Magnitude
+                if distance < closestDistance then
+                    closestDistance = distance
+                    closest = hrp
+                end
             end
         end
     end
 
-    return closestPlayer
+    return closest
 end
 
-local visionRayParams = RaycastParams.new()
-visionRayParams.FilterType = Enum.RaycastFilterType.Exclude
-visionRayParams.IgnoreWater = true
-
-local function playerCanSeeWatcher(player: Player): boolean
-    local character = player.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
-    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-
-    if not character or not hrp or not humanoid or humanoid.Health <= 0 then
-        return false
-    end
-
-    local toWatcher = root.Position - hrp.Position
-    local distance = toWatcher.Magnitude
-    if distance < 0.001 then
-        return true
-    end
-
-    local direction = toWatcher.Unit
-    local lookVector = hrp.CFrame.LookVector
-    local cosineThreshold = math.cos(math.rad(CONFIG.ViewConeAngle))
-
-    if lookVector:Dot(direction) < cosineThreshold then
-        return false
-    end
-
+local function hasLineOfSight(character: Model, targetPosition: Vector3): boolean
     if not CONFIG.RequireLineOfSight then
         return true
     end
 
-    visionRayParams.FilterDescendantsInstances = { watcherModel, character }
-    local result = Workspace:Raycast(hrp.Position, direction * distance, visionRayParams)
+    local head = character:FindFirstChild("Head")
+    local originPart = (head and head:IsA("BasePart")) and head or character:FindFirstChild("HumanoidRootPart")
+    if not originPart or not originPart:IsA("BasePart") then
+        return false
+    end
 
+    local origin = originPart.Position
+    local direction = targetPosition - origin
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { watcherModel, character }
+
+    local result = Workspace:Raycast(origin, direction, params)
     if not result then
         return true
     end
@@ -227,9 +352,65 @@ local function playerCanSeeWatcher(player: Player): boolean
     return result.Instance:IsDescendantOf(watcherModel)
 end
 
-local function anyPlayerIsWatching(): boolean
+local function isObserved(targetPosition: Vector3): boolean
     for _, player in ipairs(Players:GetPlayers()) do
-        if playerCanSeeWatcher(player) then
+        local character = player.Character
+        if character then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            if humanoid and humanoid.Health > 0 and hrp and hrp:IsA("BasePart") then
+                local lookVector = hrp.CFrame.LookVector
+                if lookVector.Magnitude > 0 then
+                    local toEnemy = targetPosition - hrp.Position
+                    if toEnemy.Magnitude > 0 then
+                        local dot = toEnemy.Unit:Dot(lookVector.Unit)
+                        if dot >= visionDotThreshold then
+                            if hasLineOfSight(character, targetPosition) then
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local function computeDestination(playerRoot: BasePart): Vector3?
+    local rootPosition = root.Position
+    local playerPosition = playerRoot.Position
+
+    local planarToPlayer = Vector3.new(playerPosition.X - rootPosition.X, 0, playerPosition.Z - rootPosition.Z)
+    local distance = planarToPlayer.Magnitude
+    if distance <= CONFIG.StopDistance then
+        return nil
+    end
+
+    local direction = planarToPlayer.Unit
+    local destination = playerPosition - direction * CONFIG.StopDistance
+    destination = ensureGrounded(destination)
+    return destination
+end
+
+local function shouldRecomputePath(destination: Vector3): boolean
+    if not lastDestination then
+        return true
+    end
+
+    if (destination - lastDestination).Magnitude >= CONFIG.RepathDistance then
+        return true
+    end
+
+    if os.clock() - lastPathCompute >= CONFIG.RepathInterval then
+        return true
+    end
+
+    local finalWaypoint = activeWaypoints[#activeWaypoints]
+    if finalWaypoint then
+        local finalPosition = ensureGrounded(finalWaypoint.Position)
+        if planarDistance(finalPosition, destination) > arrivalRadius then
             return true
         end
     end
@@ -237,233 +418,52 @@ local function anyPlayerIsWatching(): boolean
     return false
 end
 
-local function projectToGround(position: Vector3, extraExclude: Instance?): Vector3
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    if extraExclude then
-        params.FilterDescendantsInstances = { watcherModel, extraExclude }
-    else
-        params.FilterDescendantsInstances = { watcherModel }
-    end
-
-    local rayOrigin = position + Vector3.new(0, CONFIG.GroundOffset * 2, 0)
-    local result = Workspace:Raycast(rayOrigin, Vector3.new(0, -CONFIG.GroundOffset * 4, 0), params)
-    if result then
-        return Vector3.new(position.X, result.Position.Y + CONFIG.GroundOffset, position.Z)
-    end
-
-    return position
-end
-
-local activeWaypoints: { PathWaypoint }? = nil
-local activeWaypointIndex = 1
-local desiredTargetPosition: Vector3? = nil
-local pathExpiresAt = 0
-local isComputingPath = false
-local lastStepTime = 0
-local immediateRepathRequested = false
-local lastLookDirection = root.CFrame.LookVector
-
-local function moveTowardsPosition(targetPosition: Vector3, dt: number): boolean
-    local currentPosition = root.Position
-    local delta = targetPosition - currentPosition
-    if delta.Magnitude <= ARRIVAL_EPSILON then
-        local horizontal = Vector3.new(lastLookDirection.X, 0, lastLookDirection.Z)
-        if horizontal.Magnitude < 0.001 then
-            horizontal = Vector3.new(0, 0, -1)
-        end
-        local lookAt = CFrame.lookAt(targetPosition, targetPosition + horizontal.Unit)
-        root:PivotTo(lookAt)
-        return true
-    end
-
-    local moveDistance = math.min(CONFIG.MoveSpeed * dt, delta.Magnitude)
-    if moveDistance <= 0 then
-        return false
-    end
-
-    local direction = delta.Unit
-    local horizontal = Vector3.new(direction.X, 0, direction.Z)
-    if horizontal.Magnitude < 0.001 then
-        horizontal = Vector3.new(lastLookDirection.X, 0, lastLookDirection.Z)
-        if horizontal.Magnitude < 0.001 then
-            horizontal = Vector3.new(0, 0, -1)
-        end
-    else
-        lastLookDirection = horizontal.Unit
-    end
-
-    local newPosition = currentPosition + direction * moveDistance
-    local lookAt = CFrame.lookAt(newPosition, newPosition + horizontal.Unit)
-    root:PivotTo(lookAt)
-
-    return false
-end
-
-local function beginFollowingPath(waypoints: { PathWaypoint }, targetPosition: Vector3)
-    activeWaypoints = waypoints
-    activeWaypointIndex = 1
-    desiredTargetPosition = targetPosition
-    pathExpiresAt = os.clock() + CONFIG.MaxPathTime
-
-    drawPath(waypoints)
-end
-
-local function computePathAsync(targetPosition: Vector3)
-    if isComputingPath then
-        return
-    end
-
-    isComputingPath = true
-
-    task.spawn(function()
-        local ok, err = pcall(function()
-            local agentHeight = math.max(modelExtents.Y, root.Size.Y, CONFIG.GroundOffset * 2)
-            local maxWidth = math.max(modelExtents.X, modelExtents.Z, root.Size.X, root.Size.Z)
-            local agentRadius = math.max(maxWidth * 0.5, 2)
-
-            local path = PathfindingService:CreatePath({
-                AgentHeight = agentHeight,
-                AgentRadius = agentRadius,
-                AgentCanJump = CONFIG.AgentCanJump,
-            })
-
-            path:ComputeAsync(root.Position, targetPosition)
-            local waypoints = sanitizeWaypoints(path:GetWaypoints())
-
-            if path.Status == Enum.PathStatus.Success then
-                if #waypoints >= 1 then
-                    beginFollowingPath(waypoints, targetPosition)
-                else
-                    activeWaypoints = nil
-                    desiredTargetPosition = targetPosition
-                    clearMarkers()
-                end
-            else
-                activeWaypoints = nil
-                desiredTargetPosition = targetPosition
-                clearMarkers()
-            end
-        end)
-
-        if not ok then
-            warn(string.format("Watcher path computation failed: %s", tostring(err)))
-            activeWaypoints = nil
-            desiredTargetPosition = targetPosition
-            clearMarkers()
-        end
-
-        isComputingPath = false
-    end)
-end
-
-local function updateMovement(dt: number)
-    if activeWaypoints then
-        if os.clock() >= pathExpiresAt then
-            activeWaypoints = nil
-            immediateRepathRequested = true
-            clearMarkers()
-            return
-        end
-
-        local waypoint = activeWaypoints[activeWaypointIndex]
-        if not waypoint then
-            activeWaypoints = nil
-            desiredTargetPosition = nil
-            clearMarkers()
-            return
-        end
-
-        if moveTowardsPosition(waypoint.Position, dt) then
-            activeWaypointIndex += 1
-            if activeWaypointIndex > #activeWaypoints then
-                activeWaypoints = nil
-                desiredTargetPosition = nil
-                clearMarkers()
-            end
-        end
-
-        return
-    end
-
-    if desiredTargetPosition then
-        if moveTowardsPosition(desiredTargetPosition, dt) then
-            desiredTargetPosition = nil
-        end
-    end
-end
-
-local function onStep()
-    local targetPlayer = findClosestPlayer()
-    if not targetPlayer then
-        activeWaypoints = nil
-        desiredTargetPosition = nil
-        immediateRepathRequested = false
+local function update(dt: number)
+    local targetRoot = findClosestPlayerRoot()
+    if not targetRoot then
         clearMarkers()
+        activeWaypoints = {}
+        currentWaypointIndex = 1
         return
     end
 
-    local character = targetPlayer.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
-    if not character or not hrp then
-        return
-    end
+    local enemyPosition = root.Position
+    local observed = isObserved(enemyPosition)
 
-    if anyPlayerIsWatching() then
-        activeWaypoints = nil
-        desiredTargetPosition = nil
-        immediateRepathRequested = false
+    if observed then
         clearMarkers()
+        activeWaypoints = {}
+        currentWaypointIndex = 1
+        local lookVector = Vector3.new((targetRoot.Position - enemyPosition).X, 0, (targetRoot.Position - enemyPosition).Z)
+        if lookVector.Magnitude > 0.1 then
+            lastFacing = lookVector.Unit
+            watcherModel:PivotTo(CFrame.lookAt(enemyPosition, enemyPosition + lastFacing, Vector3.new(0, 1, 0)))
+        end
         return
     end
 
-    local distance = (hrp.Position - root.Position).Magnitude
-    if distance <= CONFIG.StopDistance then
-        activeWaypoints = nil
-        desiredTargetPosition = nil
+    local destination = computeDestination(targetRoot)
+    if not destination then
         clearMarkers()
-        lastLookDirection = Vector3.new(hrp.CFrame.LookVector.X, 0, hrp.CFrame.LookVector.Z)
+        activeWaypoints = {}
+        currentWaypointIndex = 1
+        local lookVector = Vector3.new((targetRoot.Position - enemyPosition).X, 0, (targetRoot.Position - enemyPosition).Z)
+        if lookVector.Magnitude > 0.1 then
+            lastFacing = lookVector.Unit
+            watcherModel:PivotTo(CFrame.lookAt(enemyPosition, enemyPosition + lastFacing, Vector3.new(0, 1, 0)))
+        end
         return
     end
 
-    local targetPosition = projectToGround(hrp.Position, character)
-
-    local needsRepath = false
-
-    if not activeWaypoints and not desiredTargetPosition then
-        needsRepath = true
-    elseif desiredTargetPosition and (targetPosition - desiredTargetPosition).Magnitude > WAYPOINT_SPACING then
-        needsRepath = true
-    elseif activeWaypoints and os.clock() >= pathExpiresAt then
-        needsRepath = true
+    if #activeWaypoints == 0 then
+        computePath(destination)
+    elseif shouldRecomputePath(destination) then
+        computePath(destination)
     end
 
-    if immediateRepathRequested then
-        needsRepath = true
-        immediateRepathRequested = false
-    end
-
-    if needsRepath then
-        computePathAsync(targetPosition)
-    elseif not activeWaypoints and desiredTargetPosition then
-        desiredTargetPosition = targetPosition
-    end
-
-    if not activeWaypoints and not desiredTargetPosition then
-        desiredTargetPosition = targetPosition
-    end
+    moveAlongPath(dt)
 end
 
 RunService.Heartbeat:Connect(function(dt)
-    if dt <= 0 then
-        return
-    end
-
-    local now = os.clock()
-    if now - lastStepTime >= CONFIG.PathRefreshSeconds then
-        lastStepTime = now
-        onStep()
-    end
-
-    updateMovement(dt)
+    update(dt)
 end)

@@ -6,23 +6,23 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local stalkerModel = script.Parent
-if not stalkerModel then
-    warn("Stalker script must be parented under the NPC model")
+if not stalkerModel or not stalkerModel:IsA("Model") then
+    warn("Stalker enemy script must be parented to a Model")
     return
 end
 
-local function findRootPart(model: Model): BasePart?
-    if model.PrimaryPart then
+local function resolvePrimaryPart(model: Model): BasePart?
+    if model.PrimaryPart and model.PrimaryPart:IsA("BasePart") then
         return model.PrimaryPart
     end
 
-    local candidate = model:FindFirstChild("HumanoidRootPart")
-    if candidate and candidate:IsA("BasePart") then
-        model.PrimaryPart = candidate
-        return candidate
+    local humanoidRoot = model:FindFirstChild("HumanoidRootPart")
+    if humanoidRoot and humanoidRoot:IsA("BasePart") then
+        model.PrimaryPart = humanoidRoot
+        return humanoidRoot
     end
 
-    for _, child in ipairs(model:GetChildren()) do
+    for _, child in model:GetChildren() do
         if child:IsA("BasePart") then
             model.PrimaryPart = child
             return child
@@ -32,94 +32,76 @@ local function findRootPart(model: Model): BasePart?
     return nil
 end
 
-local root = findRootPart(stalkerModel)
+local root = resolvePrimaryPart(stalkerModel)
 if not root then
-    warn("Stalker script requires the model to contain a BasePart to move")
+    warn("Stalker enemy requires a PrimaryPart or any BasePart to move")
     return
 end
 
-local modelExtents = stalkerModel:GetExtentsSize()
-local horizontalFootprint = math.max(modelExtents.X, modelExtents.Z, root.Size.X, root.Size.Z, 1)
-local rootHalfHeight = math.max(modelExtents.Y * 0.5, root.Size.Y * 0.5)
-local WAYPOINT_SPACING = math.clamp(horizontalFootprint * 0.2, 1, 3)
-local ARRIVAL_EPSILON = math.clamp(horizontalFootprint * 0.15, 0.75, 4)
+root.Anchored = true
 
-local DEFAULT_CONFIG = {
-    DesiredDistance = 14,
-    DistanceTolerance = 2,
-    PathRefreshSeconds = 0.5,
-    MaxPathTime = 1.5,
+local _, boundsSize = stalkerModel:GetBoundingBox()
+local horizontalFootprint = math.max(boundsSize.X, boundsSize.Z, 2)
+local modelHalfHeight = math.max(boundsSize.Y * 0.5, root.Size.Y * 0.5)
+local arrivalRadius = math.max(horizontalFootprint * 0.45, 1.5)
+local waypointSpacing = math.max(horizontalFootprint * 0.35, 1)
+
+local DEFAULTS = {
+    DesiredDistance = 12,
+    DistanceTolerance = 1.75,
     MoveSpeed = 12,
-    ShowPathVisuals = true,
-    PathMarkerSize = 0.75,
-    PathBeamWidth = 0.15,
-    PathVisualTransparency = 0.2,
-    PathVisualColor = Color3.fromRGB(255, 170, 0),
+    RepathInterval = 0.35,
+    RepathDistance = 6,
+    GroundOffset = modelHalfHeight,
+    AgentHeight = boundsSize.Y + 4,
+    AgentRadius = math.max(horizontalFootprint * 0.5, 2),
     AgentCanJump = true,
-    GroundOffset = rootHalfHeight,
+    AgentMaxSlope = 35,
+    ShowPathVisuals = true,
+    PathMarkerSize = math.max(horizontalFootprint * 0.25, 0.6),
+    PathBeamWidth = 0.18,
+    PathColor = Color3.fromRGB(255, 170, 0),
+    PathTransparency = 0.2,
 }
 
-local CONFIG = table.clone(DEFAULT_CONFIG)
+type Config = typeof(DEFAULTS)
+local CONFIG: Config = table.clone(DEFAULTS)
+
+local pathMarkersFolder = Instance.new("Folder")
+pathMarkersFolder.Name = "PathMarkers"
+pathMarkersFolder.Parent = stalkerModel
 
 local groundRayParams = RaycastParams.new()
-groundRayParams.FilterType = Enum.RaycastFilterType.Exclude
 groundRayParams.FilterDescendantsInstances = { stalkerModel }
+groundRayParams.FilterType = Enum.RaycastFilterType.Exclude
 
-type ConfigKey = typeof(DEFAULT_CONFIG)
-
-local function getAttributeOrDefault(attributeName: string, defaultValue)
-    local attributeValue = stalkerModel:GetAttribute(attributeName)
-    if attributeValue == nil then
+local function readAttribute(attributeName: string, defaultValue: any)
+    local value = stalkerModel:GetAttribute(attributeName)
+    if value == nil then
         return defaultValue
     end
 
-    return attributeValue
+    return value
 end
 
 local function refreshConfig()
-    for key, defaultValue in pairs(DEFAULT_CONFIG :: ConfigKey) do
-        CONFIG[key] = getAttributeOrDefault(key, defaultValue)
+    for key, defaultValue in pairs(DEFAULTS) do
+        (CONFIG :: any)[key] = readAttribute(key, defaultValue)
     end
 end
 
 refreshConfig()
-
-for attributeName in pairs(DEFAULT_CONFIG) do
-    stalkerModel:GetAttributeChangedSignal(attributeName):Connect(refreshConfig)
-end
-
-local markerFolder = Instance.new("Folder")
-markerFolder.Name = "PathMarkers"
-markerFolder.Parent = stalkerModel
-
-local function findClosestPlayer(): Player?
-    local closestPlayer: Player? = nil
-    local shortestDistance = math.huge
-
-    for _, player in ipairs(Players:GetPlayers()) do
-        local character = player.Character
-        local hrp = character and character:FindFirstChild("HumanoidRootPart")
-        local humanoid = character and character:FindFirstChildOfClass("Humanoid")
-
-        if character and hrp and humanoid and humanoid.Health > 0 then
-            local distance = (hrp.Position - root.Position).Magnitude
-            if distance < shortestDistance then
-                shortestDistance = distance
-                closestPlayer = player
-            end
-        end
-    end
-
-    return closestPlayer
+for key in pairs(DEFAULTS) do
+    stalkerModel:GetAttributeChangedSignal(key):Connect(refreshConfig)
 end
 
 local function clearMarkers()
-    for _, child in ipairs(markerFolder:GetChildren()) do
+    for _, child in ipairs(pathMarkersFolder:GetChildren()) do
         child:Destroy()
     end
 end
 
-local function drawPath(waypoints: { PathWaypoint })
+local function renderPath(waypoints: { PathWaypoint })
     if not CONFIG.ShowPathVisuals then
         clearMarkers()
         return
@@ -128,330 +110,306 @@ local function drawPath(waypoints: { PathWaypoint })
     clearMarkers()
 
     local previousAttachment: Attachment? = nil
-    local previousPosition = root.Position
-
     for _, waypoint in ipairs(waypoints) do
-        if (waypoint.Position - previousPosition).Magnitude > WAYPOINT_SPACING then
-            local marker = Instance.new("Part")
-            marker.Anchored = true
-            marker.CanCollide = false
-            marker.CastShadow = false
-            marker.Color = CONFIG.PathVisualColor
-            marker.Material = Enum.Material.Neon
-            marker.Shape = Enum.PartType.Ball
-            local markerSize = CONFIG.PathMarkerSize
-            marker.Size = Vector3.new(markerSize, markerSize, markerSize)
-            marker.CFrame = CFrame.new(waypoint.Position)
-            marker.Name = "Waypoint"
-            marker.Parent = markerFolder
+        local markerSize = CONFIG.PathMarkerSize
+        local marker = Instance.new("Part")
+        marker.Name = "Waypoint"
+        marker.Anchored = true
+        marker.CanCollide = false
+        marker.CastShadow = false
+        marker.Color = CONFIG.PathColor
+        marker.Material = Enum.Material.Neon
+        marker.Shape = Enum.PartType.Ball
+        marker.Transparency = CONFIG.PathTransparency
+        marker.Size = Vector3.new(markerSize, markerSize, markerSize)
+        marker.CFrame = CFrame.new(waypoint.Position)
+        marker.Parent = pathMarkersFolder
 
-            local attachment = Instance.new("Attachment")
-            attachment.Parent = marker
+        local attachment = Instance.new("Attachment")
+        attachment.Parent = marker
 
-            if previousAttachment then
-                local beam = Instance.new("Beam")
-                beam.Attachment0 = previousAttachment
-                beam.Attachment1 = attachment
-                beam.Color = ColorSequence.new(CONFIG.PathVisualColor)
-                beam.Width0 = CONFIG.PathBeamWidth
-                beam.Width1 = CONFIG.PathBeamWidth
-                beam.Transparency = NumberSequence.new(CONFIG.PathVisualTransparency)
-                beam.FaceCamera = true
-                beam.LightEmission = 1
-                beam.Parent = marker
-            end
-
-            previousAttachment = attachment
-            previousPosition = waypoint.Position
+        if previousAttachment then
+            local beam = Instance.new("Beam")
+            beam.Attachment0 = previousAttachment
+            beam.Attachment1 = attachment
+            beam.Color = ColorSequence.new(CONFIG.PathColor)
+            beam.Width0 = CONFIG.PathBeamWidth
+            beam.Width1 = CONFIG.PathBeamWidth
+            beam.Transparency = NumberSequence.new(CONFIG.PathTransparency)
+            beam.FaceCamera = true
+            beam.LightEmission = 1
+            beam.Parent = marker
         end
+
+        previousAttachment = attachment
     end
 end
 
-local function sanitizeWaypoints(waypoints: { PathWaypoint }): { PathWaypoint }
+local lastFacing = root.CFrame.LookVector
+local activeWaypoints: { PathWaypoint } = {}
+local currentWaypointIndex = 1
+local lastPathCompute = 0
+local lastDestination: Vector3? = nil
+
+local function trimWaypoints(waypoints: { PathWaypoint }, startPosition: Vector3): { PathWaypoint }
     if #waypoints == 0 then
-        return waypoints
+        return {
+            {
+                Position = startPosition,
+                Action = Enum.PathWaypointAction.Walk,
+            },
+        }
     end
 
-    local sanitized = {}
-    local lastPosition = root.Position
+    local trimmed: { PathWaypoint } = {}
+    local previous = startPosition
 
-    for _, waypoint in ipairs(waypoints) do
-        if (waypoint.Position - lastPosition).Magnitude > WAYPOINT_SPACING then
-            table.insert(sanitized, waypoint)
-            lastPosition = waypoint.Position
+    for index, waypoint in ipairs(waypoints) do
+        local distance = (waypoint.Position - previous).Magnitude
+        if distance >= waypointSpacing or index == #waypoints then
+            table.insert(trimmed, waypoint)
+            previous = waypoint.Position
         end
     end
 
-    if #sanitized == 0 then
-        table.insert(sanitized, waypoints[#waypoints])
+    if #trimmed == 0 then
+        table.insert(trimmed, {
+            Position = waypoints[#waypoints].Position,
+            Action = Enum.PathWaypointAction.Walk,
+        })
     end
 
-    return sanitized
+    return trimmed
 end
 
-local function projectToGround(position: Vector3, extraExclude: Instance?): Vector3
-    if extraExclude then
-        groundRayParams.FilterDescendantsInstances = { stalkerModel, extraExclude }
+local function computePath(destination: Vector3)
+    local path = PathfindingService:CreatePath({
+        AgentRadius = CONFIG.AgentRadius,
+        AgentHeight = CONFIG.AgentHeight,
+        AgentCanJump = CONFIG.AgentCanJump,
+        AgentMaxSlope = CONFIG.AgentMaxSlope,
+    })
+
+    local success = false
+    local status: Enum.PathStatus? = nil
+    local waypoints: { PathWaypoint } = {}
+
+    local ok, err = pcall(function()
+        path:ComputeAsync(root.Position, destination)
+    end)
+
+    if ok then
+        status = path.Status
+        if status == Enum.PathStatus.Success then
+            success = true
+            waypoints = path:GetWaypoints()
+        end
     else
-        groundRayParams.FilterDescendantsInstances = { stalkerModel }
+        warn("Failed to compute stalker path:", err)
     end
 
-    local rayOrigin = position + Vector3.new(0, CONFIG.GroundOffset * 2, 0)
-    local result = Workspace:Raycast(rayOrigin, Vector3.new(0, -CONFIG.GroundOffset * 4, 0), groundRayParams)
-    if result then
-        return Vector3.new(position.X, result.Position.Y + CONFIG.GroundOffset, position.Z)
+    if not success then
+        activeWaypoints = {
+            {
+                Position = destination,
+                Action = Enum.PathWaypointAction.Walk,
+            },
+        }
+        currentWaypointIndex = 1
+        renderPath(activeWaypoints)
+        lastDestination = destination
+        lastPathCompute = os.clock()
+        return
     end
 
-    return position
+    local trimmed = trimWaypoints(waypoints, root.Position)
+    if #trimmed > 0 and (trimmed[1].Position - root.Position).Magnitude < waypointSpacing then
+        table.remove(trimmed, 1)
+    end
+
+    if #trimmed == 0 then
+        trimmed = {
+            {
+                Position = destination,
+                Action = Enum.PathWaypointAction.Walk,
+            },
+        }
+    end
+
+    activeWaypoints = trimmed
+    currentWaypointIndex = 1
+    renderPath(activeWaypoints)
+    lastDestination = destination
+    lastPathCompute = os.clock()
 end
 
-local function computeTargetPosition(player: Player): (Vector3?, Vector3?)
-    local character = player.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
-    if not hrp then
-        return nil, nil
+local function ensureGrounded(position: Vector3): Vector3
+    local rayOrigin = position + Vector3.new(0, CONFIG.GroundOffset * 2, 0)
+    local rayDirection = Vector3.new(0, -CONFIG.GroundOffset * 4, 0)
+    local result = Workspace:Raycast(rayOrigin, rayDirection, groundRayParams)
+    if result then
+        return Vector3.new(position.X, result.Position.Y, position.Z)
     end
 
-    local rootPosition = root.Position
-    local horizontalOffset = Vector3.new(hrp.Position.X - rootPosition.X, 0, hrp.Position.Z - rootPosition.Z)
+    return Vector3.new(position.X, position.Y, position.Z)
+end
 
-    if horizontalOffset.Magnitude < 0.5 then
-        local lookVector = hrp.CFrame.LookVector
-        horizontalOffset = Vector3.new(lookVector.X, 0, lookVector.Z)
-        if horizontalOffset.Magnitude < 0.1 then
-            horizontalOffset = Vector3.new(0, 0, -1)
+local function findClosestPlayerRoot(): BasePart?
+    local closestRoot: BasePart? = nil
+    local closestDistance = math.huge
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        local character = player.Character
+        if character then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            if humanoid and humanoid.Health > 0 and hrp and hrp:IsA("BasePart") then
+                local distance = (hrp.Position - root.Position).Magnitude
+                if distance < closestDistance then
+                    closestDistance = distance
+                    closestRoot = hrp
+                end
+            end
         end
     end
 
-    local direction = horizontalOffset.Unit
-    local desiredPosition = Vector3.new(hrp.Position.X, rootPosition.Y, hrp.Position.Z) - direction * CONFIG.DesiredDistance
-    desiredPosition = projectToGround(desiredPosition, character)
-
-    if math.abs(hrp.Position.Y - desiredPosition.Y) > 6 then
-        desiredPosition = Vector3.new(desiredPosition.X, hrp.Position.Y, desiredPosition.Z)
-    end
-
-    local fallbackPosition = projectToGround(hrp.Position, character)
-    return desiredPosition, fallbackPosition
+    return closestRoot
 end
 
-local activeWaypoints: { PathWaypoint }? = nil
-local activeWaypointIndex = 1
-local desiredTargetPosition: Vector3? = nil
-local pathExpiresAt = 0
-local isComputingPath = false
-local lastStepTime = 0
-local immediateRepathRequested = false
-local lastLookDirection = root.CFrame.LookVector
+local function planarDistance(a: Vector3, b: Vector3): number
+    local delta = a - b
+    return Vector3.new(delta.X, 0, delta.Z).Magnitude
+end
 
-local function moveTowardsPosition(targetPosition: Vector3, dt: number): boolean
+local function updateFacing(moveDirection: Vector3)
+    local planar = Vector3.new(moveDirection.X, 0, moveDirection.Z)
+    if planar.Magnitude > 0.1 then
+        lastFacing = planar.Unit
+    end
+end
+
+local function moveAlongPath(dt: number)
+    local waypoint = activeWaypoints[currentWaypointIndex]
+    if not waypoint then
+        return
+    end
+
+    local walkwayPosition = ensureGrounded(waypoint.Position)
+    local targetPosition = walkwayPosition + Vector3.new(0, CONFIG.GroundOffset, 0)
     local currentPosition = root.Position
     local delta = targetPosition - currentPosition
-    if delta.Magnitude <= ARRIVAL_EPSILON then
-        local horizontal = Vector3.new(lastLookDirection.X, 0, lastLookDirection.Z)
-        if horizontal.Magnitude < 0.001 then
-            horizontal = Vector3.new(0, 0, -1)
-        end
-        local lookAt = CFrame.lookAt(targetPosition, targetPosition + horizontal.Unit)
-        root:PivotTo(lookAt)
+    local horizontalDistance = planarDistance(targetPosition, currentPosition)
+    local verticalDistance = math.abs(delta.Y)
+
+    if horizontalDistance <= arrivalRadius and verticalDistance <= CONFIG.GroundOffset * 1.5 then
+        currentWaypointIndex += 1
+        return
+    end
+
+    local moveSpeed = math.max(CONFIG.MoveSpeed, 0)
+    if moveSpeed <= 0 then
+        return
+    end
+
+    local stepDistance = moveSpeed * dt
+    if stepDistance <= 0 then
+        return
+    end
+
+    local distanceToWaypoint = delta.Magnitude
+    if distanceToWaypoint < 1e-4 then
+        currentWaypointIndex += 1
+        return
+    end
+
+    local direction = delta / distanceToWaypoint
+    updateFacing(direction)
+
+    local travel = math.min(stepDistance, distanceToWaypoint)
+    local newPosition = currentPosition + direction * travel
+    local lookVector = lastFacing.Magnitude > 0 and lastFacing or Vector3.new(0, 0, -1)
+    local pivotCFrame = CFrame.lookAt(newPosition, newPosition + lookVector, Vector3.new(0, 1, 0))
+    stalkerModel:PivotTo(pivotCFrame)
+end
+
+local function computeDesiredDestination(playerRoot: BasePart): Vector3
+    local rootPosition = root.Position
+    local playerPosition = playerRoot.Position
+
+    local offset = Vector3.new(rootPosition.X, 0, rootPosition.Z) - Vector3.new(playerPosition.X, 0, playerPosition.Z)
+    if offset.Magnitude < 0.5 then
+        offset = -playerRoot.CFrame.LookVector
+        offset = Vector3.new(offset.X, 0, offset.Z)
+    end
+
+    if offset.Magnitude < 0.5 then
+        offset = Vector3.new(0, 0, -1)
+    end
+
+    offset = offset.Unit
+    local desired = Vector3.new(playerPosition.X, playerPosition.Y, playerPosition.Z) + offset * CONFIG.DesiredDistance
+    return ensureGrounded(desired)
+end
+
+local function shouldRecomputePath(destination: Vector3): boolean
+    if not lastDestination then
         return true
     end
 
-    local moveDistance = math.min(CONFIG.MoveSpeed * dt, delta.Magnitude)
-    if moveDistance <= 0 then
-        return false
+    if (destination - lastDestination).Magnitude >= CONFIG.RepathDistance then
+        return true
     end
 
-    local direction = delta.Unit
-    local horizontal = Vector3.new(direction.X, 0, direction.Z)
-    if horizontal.Magnitude < 0.001 then
-        horizontal = Vector3.new(lastLookDirection.X, 0, lastLookDirection.Z)
-        if horizontal.Magnitude < 0.001 then
-            horizontal = Vector3.new(0, 0, -1)
+    if os.clock() - lastPathCompute >= CONFIG.RepathInterval then
+        return true
+    end
+
+    local finalWaypoint = activeWaypoints[#activeWaypoints]
+    if finalWaypoint then
+        local finalPosition = ensureGrounded(finalWaypoint.Position)
+        if planarDistance(finalPosition, destination) > arrivalRadius then
+            return true
         end
-    else
-        lastLookDirection = horizontal.Unit
     end
-
-    local newPosition = currentPosition + direction * moveDistance
-    local lookAt = CFrame.lookAt(newPosition, newPosition + horizontal.Unit)
-    root:PivotTo(lookAt)
 
     return false
 end
 
-local function beginFollowingPath(waypoints: { PathWaypoint }, targetPosition: Vector3)
-    activeWaypoints = waypoints
-    activeWaypointIndex = 1
-    desiredTargetPosition = targetPosition
-    pathExpiresAt = os.clock() + CONFIG.MaxPathTime
-
-    drawPath(waypoints)
-end
-
-local function computePathAsync(targetPosition: Vector3, fallbackPosition: Vector3?)
-    if isComputingPath then
-        return
-    end
-
-    isComputingPath = true
-
-    task.spawn(function()
-        local ok, err = pcall(function()
-            local agentHeight = math.max(modelExtents.Y, root.Size.Y, CONFIG.GroundOffset * 2)
-            local maxWidth = math.max(modelExtents.X, modelExtents.Z, root.Size.X, root.Size.Z)
-            local agentRadius = math.max(maxWidth * 0.5, 2)
-
-            local path = PathfindingService:CreatePath({
-                AgentHeight = agentHeight,
-                AgentRadius = agentRadius,
-                AgentCanJump = CONFIG.AgentCanJump,
-            })
-
-            local function tryFollow(goalPosition: Vector3)
-                path:ComputeAsync(root.Position, goalPosition)
-                local waypoints = sanitizeWaypoints(path:GetWaypoints())
-
-                if path.Status == Enum.PathStatus.Success then
-                    if #waypoints >= 1 then
-                        beginFollowingPath(waypoints, goalPosition)
-                        return true
-                    end
-
-                    activeWaypoints = nil
-                    desiredTargetPosition = goalPosition
-                    clearMarkers()
-                    return true
-                end
-
-                return false
-            end
-
-            local followed = tryFollow(targetPosition)
-
-            if not followed and fallbackPosition then
-                followed = tryFollow(fallbackPosition)
-            end
-
-            if not followed then
-                activeWaypoints = nil
-                desiredTargetPosition = fallbackPosition or targetPosition
-                clearMarkers()
-            end
-        end)
-
-        if not ok then
-            warn(string.format("Stalker path computation failed: %s", tostring(err)))
-            activeWaypoints = nil
-            desiredTargetPosition = fallbackPosition or targetPosition
-            clearMarkers()
-        end
-
-        isComputingPath = false
-    end)
-end
-
-local function updateMovement(dt: number)
-    if activeWaypoints then
-        if os.clock() >= pathExpiresAt then
-            activeWaypoints = nil
-            immediateRepathRequested = true
-            clearMarkers()
-            return
-        end
-
-        local waypoint = activeWaypoints[activeWaypointIndex]
-        if not waypoint then
-            activeWaypoints = nil
-            desiredTargetPosition = nil
-            clearMarkers()
-            return
-        end
-
-        if moveTowardsPosition(waypoint.Position, dt) then
-            activeWaypointIndex += 1
-            if activeWaypointIndex > #activeWaypoints then
-                activeWaypoints = nil
-                desiredTargetPosition = nil
-                clearMarkers()
-            end
-        end
-
-        return
-    end
-
-    if desiredTargetPosition then
-        if moveTowardsPosition(desiredTargetPosition, dt) then
-            desiredTargetPosition = nil
-        end
-    end
-end
-
-local function onStep()
-    local player = findClosestPlayer()
-    if not player then
-        activeWaypoints = nil
-        desiredTargetPosition = nil
-        immediateRepathRequested = false
+local function update(dt: number)
+    local targetRoot = findClosestPlayerRoot()
+    if not targetRoot then
         clearMarkers()
+        activeWaypoints = {}
+        currentWaypointIndex = 1
         return
     end
 
-    local character = player.Character
-    local hrp = character and character:FindFirstChild("HumanoidRootPart")
-    if not character or not hrp then
-        return
-    end
+    local destination = computeDesiredDestination(targetRoot)
+    local distanceToPlayer = planarDistance(root.Position, targetRoot.Position)
+    local distanceError = math.abs(distanceToPlayer - CONFIG.DesiredDistance)
 
-    local targetPosition, fallbackPosition = computeTargetPosition(player)
-    if not targetPosition then
-        return
-    end
-
-    local currentDistance = (hrp.Position - root.Position).Magnitude
-    if math.abs(currentDistance - CONFIG.DesiredDistance) <= CONFIG.DistanceTolerance then
-        activeWaypoints = nil
-        desiredTargetPosition = nil
+    if distanceError <= CONFIG.DistanceTolerance then
+        activeWaypoints = {}
+        currentWaypointIndex = 1
         clearMarkers()
+        local lookVector = Vector3.new((targetRoot.Position - root.Position).X, 0, (targetRoot.Position - root.Position).Z)
+        if lookVector.Magnitude > 0.1 then
+            lastFacing = lookVector.Unit
+            local pivot = CFrame.lookAt(root.Position, root.Position + lastFacing, Vector3.new(0, 1, 0))
+            stalkerModel:PivotTo(pivot)
+        end
         return
     end
 
-    local needsRepath = false
-
-    if not activeWaypoints and not desiredTargetPosition then
-        needsRepath = true
-    elseif desiredTargetPosition and (targetPosition - desiredTargetPosition).Magnitude > CONFIG.DistanceTolerance then
-        needsRepath = true
-    elseif activeWaypoints and os.clock() >= pathExpiresAt then
-        needsRepath = true
+    if #activeWaypoints == 0 then
+        computePath(destination)
+    elseif shouldRecomputePath(destination) then
+        computePath(destination)
     end
 
-    if immediateRepathRequested then
-        needsRepath = true
-        immediateRepathRequested = false
-    end
-
-    if needsRepath then
-        computePathAsync(targetPosition, fallbackPosition)
-    elseif not activeWaypoints and desiredTargetPosition then
-        desiredTargetPosition = targetPosition
-    end
-
-    if not activeWaypoints and not desiredTargetPosition then
-        desiredTargetPosition = targetPosition
-    end
+    moveAlongPath(dt)
 end
 
 RunService.Heartbeat:Connect(function(dt)
-    if dt <= 0 then
-        return
-    end
-
-    local now = os.clock()
-    if now - lastStepTime >= CONFIG.PathRefreshSeconds then
-        lastStepTime = now
-        onStep()
-    end
-
-    updateMovement(dt)
+    update(dt)
 end)
