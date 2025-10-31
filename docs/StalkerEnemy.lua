@@ -26,16 +26,48 @@ end
 
 local primary = model.PrimaryPart
 
-local function anchorModelParts()
-    for _, descendant in ipairs(model:GetDescendants()) do
-        if descendant:IsA("BasePart") then
-            descendant.Anchored = true
-            descendant.Massless = true
-        end
+local baseParts = {}
+local originalAnchored = {}
+local originalMassless = {}
+
+for _, descendant in ipairs(model:GetDescendants()) do
+    if descendant:IsA("BasePart") then
+        table.insert(baseParts, descendant)
+        originalAnchored[descendant] = descendant.Anchored
+        originalMassless[descendant] = descendant.Massless
     end
 end
 
-anchorModelParts()
+local currentAnchoringState
+
+local function applyAnchoring(shouldAnchor)
+    if currentAnchoringState == shouldAnchor then
+        return
+    end
+
+    currentAnchoringState = shouldAnchor
+
+    for _, part in ipairs(baseParts) do
+        if shouldAnchor then
+            part.Anchored = true
+            part.Massless = true
+        else
+            local anchored = originalAnchored[part]
+            if anchored ~= nil then
+                part.Anchored = anchored
+            else
+                part.Anchored = false
+            end
+
+            local massless = originalMassless[part]
+            if massless ~= nil then
+                part.Massless = massless
+            else
+                part.Massless = false
+            end
+        end
+    end
+end
 
 local _, boundsSize = model:GetBoundingBox()
 local footprint = Vector2.new(math.max(boundsSize.X, 1), math.max(boundsSize.Z, 1))
@@ -52,6 +84,7 @@ local baseDefaults = {
     ShowPathVisuals = true,
     PathBeamWidth = 0.18,
     PathTransparency = 0.2,
+    AutoAnchorParts = false,
 }
 
 local dynamicDefaults = {
@@ -89,6 +122,8 @@ local function readAttribute(name)
 end
 
 local function applyConfig()
+    local previousAnchoring = config.AutoAnchorParts
+
     config.DesiredDistance = math.max(0, readAttribute("DesiredDistance"))
     config.DistanceTolerance = math.max(0.25, readAttribute("DistanceTolerance"))
     config.MoveSpeed = math.max(0, readAttribute("MoveSpeed"))
@@ -104,6 +139,11 @@ local function applyConfig()
     config.PathBeamWidth = math.max(0.01, readAttribute("PathBeamWidth"))
     config.PathColor = readAttribute("PathColor")
     config.PathTransparency = math.clamp(readAttribute("PathTransparency"), 0, 1)
+    config.AutoAnchorParts = readAttribute("AutoAnchorParts") and true or false
+
+    if previousAnchoring == nil or previousAnchoring ~= config.AutoAnchorParts then
+        applyAnchoring(config.AutoAnchorParts)
+    end
 end
 
 applyConfig()

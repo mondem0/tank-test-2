@@ -38,17 +38,38 @@ if not root then
     return
 end
 
-root.Anchored = true
+local baseParts = {}
+local originalAnchored: { [BasePart]: boolean } = {}
 
-local function anchorModelParts(model: Model)
-    for _, descendant in ipairs(model:GetDescendants()) do
-        if descendant:IsA("BasePart") then
-            descendant.Anchored = true
-        end
+for _, descendant in ipairs(watcherModel:GetDescendants()) do
+    if descendant:IsA("BasePart") then
+        baseParts[#baseParts + 1] = descendant
+        originalAnchored[descendant] = descendant.Anchored
     end
 end
 
-anchorModelParts(watcherModel)
+local currentAnchoringState: boolean?
+
+local function applyAnchoring(shouldAnchor: boolean)
+    if currentAnchoringState == shouldAnchor then
+        return
+    end
+
+    currentAnchoringState = shouldAnchor
+
+    for _, part in ipairs(baseParts) do
+        if shouldAnchor then
+            part.Anchored = true
+        else
+            local original = originalAnchored[part]
+            if original ~= nil then
+                part.Anchored = original
+            else
+                part.Anchored = false
+            end
+        end
+    end
+end
 
 local _, boundsSize = watcherModel:GetBoundingBox()
 local horizontalFootprint = math.max(boundsSize.X, boundsSize.Z, 2)
@@ -73,6 +94,7 @@ local DEFAULTS = {
     PathBeamWidth = 0.18,
     PathColor = Color3.fromRGB(160, 80, 255),
     PathTransparency = 0.25,
+    AutoAnchorParts = false,
 }
 
 type Config = typeof(DEFAULTS)
@@ -97,18 +119,28 @@ local function readAttribute(attributeName: string, defaultValue: AnyValue)
 end
 
 local function refreshConfig()
+    local previousAnchoring = CONFIG.AutoAnchorParts
+
     for key, defaultValue in pairs(DEFAULTS) do
         (CONFIG :: any)[key] = readAttribute(key, defaultValue)
     end
 
     local cone = math.clamp(CONFIG.ViewConeAngle, 1, 179)
     visionDotThreshold = math.cos(math.rad(cone * 0.5))
+
+    CONFIG.AutoAnchorParts = readAttribute("AutoAnchorParts", DEFAULTS.AutoAnchorParts) and true or false
+
+    if previousAnchoring == nil or previousAnchoring ~= CONFIG.AutoAnchorParts then
+        applyAnchoring(CONFIG.AutoAnchorParts)
+    end
 end
 
 refreshConfig()
 for key in pairs(DEFAULTS) do
     watcherModel:GetAttributeChangedSignal(key):Connect(refreshConfig)
 end
+
+applyAnchoring(CONFIG.AutoAnchorParts)
 
 local function clearMarkers()
     for _, child in ipairs(pathMarkersFolder:GetChildren()) do

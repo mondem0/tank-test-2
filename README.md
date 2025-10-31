@@ -1,6 +1,6 @@
 # Roblox Enemy AI Scripts
 
-This repository ships two standalone Roblox server scripts that drive enemy behaviors without relying on `Humanoid:MoveTo`. Both scripts only need a model with a `PrimaryPart`; they keep that part anchored and pivot the entire model along the computed navigation path so custom creatures of any size stay in control.
+This repository ships two standalone Roblox server scripts that drive enemy behaviors without relying on `Humanoid:MoveTo`. Both scripts only need a model with a `PrimaryPart`; they pivot the entire model along the computed navigation path each heartbeat so custom creatures of any size stay in control.
 
 - [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) keeps its distance from the closest player by constantly backing up or advancing until it matches a configurable standoff radius.
 - [`docs/WatcherEnemy.lua`](docs/WatcherEnemy.lua) stalks the nearest player but freezes the moment anyone is looking at it, resuming the chase as soon as every observer looks away.
@@ -13,7 +13,7 @@ This repository ships two standalone Roblox server scripts that drive enemy beha
 2. Set the model's **PrimaryPart** to the piece you want the script to move. A `Humanoid` is optional; any `BasePart` works.
 3. Drop a normal **Script** under the model and paste the contents of the desired file from the `docs/` folder.
 
-Both scripts anchor every `BasePart` in the model (including the `PrimaryPart`), create a `PathMarkers` folder for debug visuals, and size their pathfinding agents from the full model bounds so oversized monsters behave reliably.
+Both scripts create a `PathMarkers` folder for debug visuals and size their pathfinding agents from the full model bounds so oversized monsters behave reliably. Set the `AutoAnchorParts` attribute to `true` if you want the script to anchor every `BasePart` before it starts moving; otherwise the original anchored states are preserved.
 
 ### 2. Optional configuration attributes
 
@@ -38,6 +38,7 @@ Add attributes to the model to override any of the defaults listed below. You ca
 | `PathBeamWidth` | Number | 0.18 | Width of the connecting beams. |
 | `PathColor` | Color3 | Orange | Color used for both markers and beams. |
 | `PathTransparency` | Number | 0.2 | Transparency applied to the path visuals. |
+| `AutoAnchorParts` | Boolean | `false` | Anchor every `BasePart` in the model when the script initializes. |
 
 #### Watcher enemy attributes
 
@@ -59,6 +60,7 @@ Add attributes to the model to override any of the defaults listed below. You ca
 | `PathBeamWidth` | Number | 0.18 | Width of the connecting beams. |
 | `PathColor` | Color3 | Purple | Color used for markers and beams. |
 | `PathTransparency` | Number | 0.25 | Transparency for the path visuals. |
+| `AutoAnchorParts` | Boolean | `false` | Anchor every `BasePart` in the model when the script initializes. |
 
 Remove an attribute to fall back to the default listed above.
 
