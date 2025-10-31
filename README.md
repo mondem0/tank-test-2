@@ -52,6 +52,7 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
 - The script assumes the NPC has enough room to pathfind. Place a `NavigationMesh` or set your workspace terrain settings if your experience uses custom navigation agents.
 - Because the script runs on the server it will guide the NPC consistently for all players.
 - For large experiences consider adding throttling or using `PathfindingService:CreatePath` with customized agent parameters to better match your enemy's collision size.
+- The waypoint arrival tolerance automatically scales with the model's horizontal footprint (not its height), preventing tall monsters from spinning in place while they try to reach a new path.
 
 ## Roblox "Watcher" Enemy AI
 
@@ -104,3 +105,4 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
 - Because observation checks run every heartbeat on the server, the watcher reacts immediately to players looking at it even in multiplayer sessions.
 - If `RequireLineOfSight` is disabled, the watcher will also freeze when players stare at it through walls, which can be useful for simple horror setups.
 - Pairing the watcher with the stalker enemy lets you create varied pressure—one hovers at a distance, while the other advances only when nobody keeps an eye on it.
+- Just like the stalker, the watcher bases its waypoint completion radius on the model's horizontal size so oversized or tall rigs keep gliding forward instead of rotating in place at the start of a path.

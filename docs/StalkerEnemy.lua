@@ -39,7 +39,8 @@ if not root then
 end
 
 local rootHalfHeight = root.Size.Y * 0.5
-local POSITION_EPSILON = math.max(root.Size.Magnitude * 0.1, 0.5)
+local horizontalFootprint = math.max(root.Size.X, root.Size.Z, 1)
+local POSITION_EPSILON = math.clamp(horizontalFootprint * 0.25, 0.5, 4)
 
 local DEFAULT_CONFIG = {
     DesiredDistance = 14,
