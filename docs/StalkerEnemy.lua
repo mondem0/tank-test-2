@@ -131,7 +131,7 @@ local function drawPath(waypoints: { PathWaypoint })
     end
 end
 
-local function computeTargetPosition(player: Player): Vector3?
+local function computeTargetPosition(player: Player): (Vector3?, Vector3?)
     local character = player.Character
     if character then
         groundRayParams.FilterDescendantsInstances = { stalkerModel, character }
@@ -140,7 +140,7 @@ local function computeTargetPosition(player: Player): Vector3?
     end
     local hrp = character and character:FindFirstChild("HumanoidRootPart")
     if not hrp then
-        return nil
+        return nil, nil
     end
 
     local rootPosition = root.Position
@@ -169,7 +169,14 @@ local function computeTargetPosition(player: Player): Vector3?
         desiredPosition = Vector3.new(desiredPosition.X, hrp.Position.Y, desiredPosition.Z)
     end
 
-    return desiredPosition
+    local fallbackPosition = hrp.Position
+    local fallbackRayOrigin = fallbackPosition + Vector3.new(0, CONFIG.DesiredDistance, 0)
+    local fallbackRaycastResult = Workspace:Raycast(fallbackRayOrigin, Vector3.new(0, -CONFIG.DesiredDistance * 4, 0), groundRayParams)
+    if fallbackRaycastResult then
+        fallbackPosition = Vector3.new(fallbackPosition.X, fallbackRaycastResult.Position.Y + humanoid.HipHeight, fallbackPosition.Z)
+    end
+
+    return desiredPosition, fallbackPosition
 end
 
 local activeWaypoints: { PathWaypoint }? = nil
@@ -197,6 +204,7 @@ local function followNextWaypoint()
 
     if waypoint.Action == Enum.PathWaypointAction.Jump then
         humanoid.Jump = true
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
     end
 
     humanoid:MoveTo(waypoint.Position)
@@ -225,7 +233,7 @@ local function beginFollowingPath(waypoints: { PathWaypoint }, targetPosition: V
     followNextWaypoint()
 end
 
-local function computePathAsync(targetPosition: Vector3)
+local function computePathAsync(targetPosition: Vector3, fallbackPosition: Vector3?)
     if isComputingPath then
         return
     end
@@ -250,15 +258,28 @@ local function computePathAsync(targetPosition: Vector3)
                 AgentCanJump = CONFIG.AgentCanJump,
             })
 
-            path:ComputeAsync(root.Position, targetPosition)
-            local waypoints = path:GetWaypoints()
+            local function tryFollow(goalPosition: Vector3)
+                path:ComputeAsync(root.Position, goalPosition)
+                local waypoints = path:GetWaypoints()
 
-            if path.Status == Enum.PathStatus.Success and #waypoints >= 2 then
-                beginFollowingPath(waypoints, targetPosition)
-            else
+                if path.Status == Enum.PathStatus.Success and #waypoints >= 2 then
+                    beginFollowingPath(waypoints, goalPosition)
+                    return true
+                end
+
+                return false
+            end
+
+            local followed = tryFollow(targetPosition)
+
+            if not followed and fallbackPosition then
+                followed = tryFollow(fallbackPosition)
+            end
+
+            if not followed then
                 activeWaypoints = nil
                 clearMarkers()
-                humanoid:MoveTo(targetPosition)
+                humanoid:MoveTo(fallbackPosition or targetPosition)
             end
         end)
 
@@ -266,7 +287,7 @@ local function computePathAsync(targetPosition: Vector3)
             warn(string.format("Stalker path computation failed: %s", tostring(err)))
             activeWaypoints = nil
             clearMarkers()
-            humanoid:MoveTo(targetPosition)
+            humanoid:MoveTo(fallbackPosition or targetPosition)
         end
 
         isComputingPath = false
@@ -295,7 +316,7 @@ local function onStep()
         return
     end
 
-    local targetPosition = computeTargetPosition(player)
+    local targetPosition, fallbackPosition = computeTargetPosition(player)
     if not targetPosition then
         return
     end
@@ -325,7 +346,7 @@ local function onStep()
     end
 
     if needsRepath then
-        computePathAsync(targetPosition)
+        computePathAsync(targetPosition, fallbackPosition)
     end
 
     if not activeWaypoints then

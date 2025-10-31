@@ -37,7 +37,8 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
      - Compute a path that positions the NPC at the desired distance from the player.
      - Move along the path using `Humanoid:MoveTo`, backing away if the player approaches and following if the player retreats.
      - Keep gliding while recalculating paths so it doesn't pause each time it searches for a new route.
-     - Snap its goal down to the walkable floor and immediately request a new path if it slips off a ledge, so it is far less likely to get stuck on edges or when the player is above it.
+     - Snap its goal down to the walkable floor, force jumps when the pathfinder calls for it, and immediately request a new path if it slips off a ledge, so it is far less likely to get stuck on edges or when the player is above it.
+     - Fall back to the player's current footing when the preferred standoff spot is unreachable, letting the stalker climb up simple parkour platforms before backing off to the desired distance again.
      - Spawn glowing spheres and beams that reveal each waypoint in the computed path.
    - The trail updates every time the NPC recalculates its path, so you can visualize how it reacts to obstacles and player movement.
 
