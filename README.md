@@ -64,6 +64,7 @@ Remove an attribute to fall back to the default listed above.
 
 ### 3. Testing tips
 
+- The stalker now remembers the direction it should orbit around the closest player, letting giant creatures glide toward the first meaningful waypoint instead of spinning in place.
 - Both enemies recalculate their desired destination every heartbeat and trim away zero-length waypoints so the first marker never spawns inside the model.
 - The scripts raycast beneath each goal to stay glued to the ground even when the player stands on ledges.
 - The watcher checks every player each heartbeat. If any player is inside the configured view cone (and, if required, has direct line of sight) the watcher clears its path, faces the player, and waits.
