@@ -40,6 +40,16 @@ end
 
 root.Anchored = true
 
+local function anchorModelParts(model: Model)
+    for _, descendant in ipairs(model:GetDescendants()) do
+        if descendant:IsA("BasePart") then
+            descendant.Anchored = true
+        end
+    end
+end
+
+anchorModelParts(watcherModel)
+
 local _, boundsSize = watcherModel:GetBoundingBox()
 local horizontalFootprint = math.max(boundsSize.X, boundsSize.Z, 2)
 local modelHalfHeight = math.max(boundsSize.Y * 0.5, root.Size.Y * 0.5)

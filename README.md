@@ -13,7 +13,7 @@ This repository ships two standalone Roblox server scripts that drive enemy beha
 2. Set the model's **PrimaryPart** to the piece you want the script to move. A `Humanoid` is optional; any `BasePart` works.
 3. Drop a normal **Script** under the model and paste the contents of the desired file from the `docs/` folder.
 
-Both scripts will anchor the `PrimaryPart`, create a `PathMarkers` folder for debug visuals, and size their pathfinding agents from the full model bounds so oversized monsters behave reliably.
+Both scripts anchor every `BasePart` in the model (including the `PrimaryPart`), create a `PathMarkers` folder for debug visuals, and size their pathfinding agents from the full model bounds so oversized monsters behave reliably.
 
 ### 2. Optional configuration attributes
 
