@@ -123,25 +123,6 @@ local function drawPath(waypoints: { PathWaypoint })
     end
 end
 
-local function waitForMove(timeout: number)
-    local completed = false
-    local connection: RBXScriptConnection? = nil
-    connection = humanoid.MoveToFinished:Connect(function()
-        completed = true
-    end)
-
-    local startTime = os.clock()
-    while not completed and os.clock() - startTime < timeout do
-        RunService.Heartbeat:Wait()
-    end
-
-    if connection then
-        connection:Disconnect()
-    end
-
-    return completed
-end
-
 local function computeTargetPosition(player: Player): Vector3?
     local character = player.Character
     local hrp = character and character:FindFirstChild("HumanoidRootPart")
@@ -163,16 +144,118 @@ local function computeTargetPosition(player: Player): Vector3?
     return hrp.Position - offsetDirection * CONFIG.DesiredDistance
 end
 
+local activeWaypoints: { PathWaypoint }? = nil
+local activeWaypointIndex = 0
+local desiredTargetPosition: Vector3? = nil
+local pathExpiresAt = 0
+local isComputingPath = false
+local lastStepTime = 0
+
+local function followNextWaypoint()
+    if not activeWaypoints then
+        return
+    end
+
+    local nextIndex = activeWaypointIndex + 1
+    if nextIndex > #activeWaypoints then
+        activeWaypoints = nil
+        clearMarkers()
+        return
+    end
+
+    activeWaypointIndex = nextIndex
+    local waypoint = activeWaypoints[nextIndex]
+
+    if waypoint.Action == Enum.PathWaypointAction.Jump then
+        humanoid.Jump = true
+    end
+
+    humanoid:MoveTo(waypoint.Position)
+end
+
+humanoid.MoveToFinished:Connect(function(reached)
+    if not activeWaypoints then
+        return
+    end
+
+    if reached then
+        followNextWaypoint()
+    else
+        activeWaypoints = nil
+    end
+end)
+
+local function beginFollowingPath(waypoints: { PathWaypoint }, targetPosition: Vector3)
+    activeWaypoints = waypoints
+    activeWaypointIndex = 1
+    desiredTargetPosition = targetPosition
+    pathExpiresAt = os.clock() + CONFIG.MaxPathTime
+
+    drawPath(waypoints)
+    followNextWaypoint()
+end
+
+local function computePathAsync(targetPosition: Vector3)
+    if isComputingPath then
+        return
+    end
+
+    isComputingPath = true
+
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local agentHeight = math.max(root.Size.Y, humanoid.HipHeight * 2)
+            local agentRadius = math.max(root.Size.X * 0.5, 2)
+
+            local success, description = pcall(function()
+                return humanoid:GetAppliedDescription()
+            end)
+            if success and description then
+                agentHeight = math.max(agentHeight, 5 * description.HeightScale)
+            end
+
+            local path = PathfindingService:CreatePath({
+                AgentHeight = agentHeight,
+                AgentRadius = agentRadius,
+                AgentCanJump = CONFIG.AgentCanJump,
+            })
+
+            path:ComputeAsync(root.Position, targetPosition)
+            local waypoints = path:GetWaypoints()
+
+            if path.Status == Enum.PathStatus.Success and #waypoints >= 2 then
+                beginFollowingPath(waypoints, targetPosition)
+            else
+                activeWaypoints = nil
+                clearMarkers()
+                humanoid:MoveTo(targetPosition)
+            end
+        end)
+
+        if not ok then
+            warn(string.format("Stalker path computation failed: %s", tostring(err)))
+            activeWaypoints = nil
+            clearMarkers()
+            humanoid:MoveTo(targetPosition)
+        end
+
+        isComputingPath = false
+    end)
+end
+
 local function onStep()
     if humanoid.Health <= 0 then
+        activeWaypoints = nil
         clearMarkers()
         return
     end
 
     local player = findClosestPlayer()
     if not player then
-        humanoid:MoveTo(root.Position)
+        activeWaypoints = nil
+        desiredTargetPosition = nil
         clearMarkers()
+        humanoid:MoveTo(root.Position)
         return
     end
 
@@ -182,72 +265,44 @@ local function onStep()
         return
     end
 
-    local currentDistance = (hrp.Position - root.Position).Magnitude
-    if math.abs(currentDistance - CONFIG.DesiredDistance) <= CONFIG.DistanceTolerance then
-        humanoid:MoveTo(root.Position)
-        clearMarkers()
-        return
-    end
-
     local targetPosition = computeTargetPosition(player)
     if not targetPosition then
         return
     end
 
-    local agentHeight = math.max(root.Size.Y, humanoid.HipHeight * 2)
-    local agentRadius = math.max(root.Size.X * 0.5, 2)
-
-    local success, description = pcall(function()
-        return humanoid:GetAppliedDescription()
-    end)
-    if success and description then
-        agentHeight = math.max(agentHeight, 5 * description.HeightScale)
-    end
-
-    local path = PathfindingService:CreatePath({
-        AgentHeight = agentHeight,
-        AgentRadius = agentRadius,
-        AgentCanJump = CONFIG.AgentCanJump,
-    })
-
-    path:ComputeAsync(root.Position, targetPosition)
-    local waypoints = path:GetWaypoints()
-
-    if path.Status ~= Enum.PathStatus.Success or #waypoints == 0 then
+    local currentDistance = (hrp.Position - root.Position).Magnitude
+    if math.abs(currentDistance - CONFIG.DesiredDistance) <= CONFIG.DistanceTolerance then
+        activeWaypoints = nil
+        desiredTargetPosition = nil
         clearMarkers()
-        humanoid:MoveTo(targetPosition)
-        waitForMove(CONFIG.PathRefreshSeconds)
+        humanoid:MoveTo(root.Position)
         return
     end
 
-    drawPath(waypoints)
+    local needsRepath = false
 
-    local pathStart = os.clock()
+    if not activeWaypoints then
+        needsRepath = true
+    elseif os.clock() >= pathExpiresAt then
+        needsRepath = true
+    elseif desiredTargetPosition and (targetPosition - desiredTargetPosition).Magnitude > CONFIG.DistanceTolerance then
+        needsRepath = true
+    end
 
-    for index = 2, #waypoints do
-        local waypoint = waypoints[index]
-        if waypoint.Action == Enum.PathWaypointAction.Jump then
-            humanoid.Jump = true
-        end
+    if needsRepath then
+        computePathAsync(targetPosition)
+    end
 
-        humanoid:MoveTo(waypoint.Position)
-        local reached = waitForMove(CONFIG.PathRefreshSeconds)
-
-        local updatedDistance = (hrp.Position - root.Position).Magnitude
-        if math.abs(updatedDistance - CONFIG.DesiredDistance) <= CONFIG.DistanceTolerance then
-            break
-        end
-
-        if not reached then
-            break
-        end
-
-        if os.clock() - pathStart > CONFIG.MaxPathTime then
-            break
-        end
+    if not activeWaypoints then
+        humanoid:MoveTo(targetPosition)
+        desiredTargetPosition = targetPosition
     end
 end
 
-while task.wait(CONFIG.PathRefreshSeconds) do
-    onStep()
-end
+RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+    if now - lastStepTime >= CONFIG.PathRefreshSeconds then
+        lastStepTime = now
+        onStep()
+    end
+end)

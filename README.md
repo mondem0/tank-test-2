@@ -35,6 +35,7 @@ Use the Lua script in [`docs/StalkerEnemy.lua`](docs/StalkerEnemy.lua) to create
      - Pick the closest living player each refresh cycle.
      - Compute a path that positions the NPC at the desired distance from the player.
      - Move along the path using `Humanoid:MoveTo`, backing away if the player approaches and following if the player retreats.
+     - Keep gliding while recalculating paths so it doesn't pause each time it searches for a new route.
      - Spawn glowing spheres and beams that reveal each waypoint in the computed path.
    - The trail updates every time the NPC recalculates its path, so you can visualize how it reacts to obstacles and player movement.
 
